@@ -61,7 +61,13 @@ We have [five scripts](https://github.com/codding-nepale/proxmox-win-cloudinit/t
 * Update the system on startup (may slow down VM startup time)
 * Eject the cloud-init disk after all the steps performed at startup.
 
+## If you were using the update script, please run these two commands before running the SysPrep:
+```ps1
+Install-Module PSWindowsUpdate -Force -AllowClobber
+Import-Module PSWindowsUpdate
+```
 Move those scripts into Cloudbase Solutions\Cloudbase-Init\LocalScripts\ in your program files of your Windows VM.
+
 
 ### Configure Cloudbase-Init
 Deploy [these two conf files](https://github.com/codding-nepale/proxmox-win-cloudinit/tree/main/conf) to `C:\Program Files\Cloudbase Solutions\Cloudbase-Init\conf`.

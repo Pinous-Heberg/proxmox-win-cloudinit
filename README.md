@@ -1,5 +1,5 @@
 # proxmox-win-cloudinit
-
+## ⚠️This project doesn't belong to me. The github repository is just a fork of [Gecko-IT](https://git.geco-it.net/GECO-IT-PUBLIC/Geco-Cloudbase-Init) which is at the origin of this project but which doesn't keep it up to date anymore, that's why I decided to keep it up to date with proxmox v8 which has just been released.
 This is an implementation of Cloudbase-Init to Windows virtual machines running in a Proxmox Node in order to use cloud-init with those vms.
 
 What can you do with this implementation?
@@ -54,19 +54,19 @@ Install Cloudbase-Init Continous Build from the [official website](https://cloud
 Why Continous Build? Because the stable build dates from 2020 and doesn't include functionalities we use.
 
 ### Cloudbase-Init LocalScripts
-We have [two scripts](https://git.geco-it.net/c.soylu/Geco-cloudbase-init/src/branch/master/localscripts) that do some fonctionality that Cloudbase-Init doesnt have;
+We have [five scripts](https://github.com/codding-nepale/proxmox-win-cloudinit/tree/main/localscripts) that do some fonctionality that Cloudbase-Init doesnt have;
 * Enabling administrator user when it's name is given to the Cloudbase-Init.
 * Enabling DHCP on the network adapters.
 
 Move those scripts into Cloudbase Solutions\Cloudbase-Init\LocalScripts\ in your program files of your Windows VM.
 
 ### Configure Cloudbase-Init
-Deploy [these two conf files](https://git.geco-it.net/c.soylu/Geco-Cloudbase-Init/src/branch/master/conf) to `C:\Program Files\Cloudbase Solutions\Cloudbase-Init\conf`.
+Deploy [these two conf files](https://github.com/codding-nepale/proxmox-win-cloudinit/tree/main/conf) to `C:\Program Files\Cloudbase Solutions\Cloudbase-Init\conf`.
 
-Inside those files you will find the default Administrator name and the user group that will be used while user creation. You can launch our [ModifyConf.ps1](https://git.geco-it.net/GECO-IT-PUBLIC/Geco-Cloudbase-Init/src/branch/master/powershell) script to modify that file to get the correct username and group of your Windows language.
+Inside those files you will find the default Administrator name and the user group that will be used while user creation. You can launch our [ModifyConf.ps1](https://github.com/codding-nepale/proxmox-win-cloudinit/tree/main/powershell) script to modify that file to get the correct username and group of your Windows language.
 
 ### Run PowerShell Script
-[This](https://git.geco-it.net/c.soylu/Geco-cloudbase-init/src/branch/master/powershell) powershell script has a few uses.
+[This](https://github.com/codding-nepale/proxmox-win-cloudinit/tree/main/powershell) powershell script has a few uses.
 * Deletes the "cloudbase-init" user, delegates "cloudbase-init" service to local Systeme user and modifies execution path of the script also to use local system user.
 * Installs OpenSSH-Server from optional features of Windows.
 * Removes a store language package that causes an error when generelazing for sysprep.

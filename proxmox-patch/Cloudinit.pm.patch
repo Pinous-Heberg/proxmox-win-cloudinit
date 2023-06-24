@@ -1,15 +1,18 @@
---- /usr/share/perl5/PVE/QemuServer/Cloudinit.pm.orig	2023-01-16 20:52:30.000000000 +0800
-+++ /usr/share/perl5/PVE/QemuServer/Cloudinit.pm	2023-03-06 16:26:19.193812873 +0800
-@@ -165,13 +165,22 @@ sub configdrive2_network {
+--- /usr/share/perl5/PVE/QemuServer/Cloudinit.pm.orign	2023-06-24 14:38:04.430019560 +0200
++++ /usr/share/perl5/PVE/QemuServer/Cloudinit.pm	2023-06-24 14:52:20.325538276 +0200
+@@ -166,14 +166,24 @@
+     my $content = "auto lo\n";
      $content .= "iface lo inet loopback\n\n";
  
-     my ($searchdomains, $nameservers) = get_dns_conf($conf);
+-    my ($searchdomains, $nameservers) = get_dns_conf($conf);
++    my ($searchdomains, $nameservers) = get_dns_conf($conf); 
 +
-+    ## support windows
-+    my $ostype = $conf->{"ostype"};
-+    my $default_dns = '';
-+    my $default_search = '';
-+    ##
++	## support windows
++	my $ostype = $conf->{"ostype"};
++	my $default_dns = '';
++	my $default_search = '';
++	##
++	my $dnsinserted = 0; # insert dns just once for the machine
 +
      if ($nameservers && @$nameservers) {
  	$nameservers = join(' ', @$nameservers);
@@ -19,91 +22,94 @@
      if ($searchdomains && @$searchdomains) {
  	$searchdomains = join(' ', @$searchdomains);
  	$content .= "        dns_search $searchdomains\n";
-+	$default_search = $searchdomains; # Support windows
++	$default_search = $searchdomains; # Support Windows
      }
  
      my @ifaces = grep { /^net(\d+)$/ } keys %$conf;
-@@ -191,6 +200,12 @@ sub configdrive2_network {
+@@ -193,6 +203,13 @@
  		$content .= "        address $addr\n";
  		$content .= "        netmask $mask\n";
  		$content .= "        gateway $net->{gw}\n" if $net->{gw};
-+                ## Support Windows
-+                if(PVE::QemuServer::windows_version($ostype) && ($id eq "eth0")) {
-+                    $content .= "        dns-nameservers $default_dns\n";
-+                    $content .= "        dns-search $default_search\n";
-+                }
-+                ##
++		## Support Windows
++		if(PVE::QemuServer::windows_version($ostype) && not($dnsinserted)) {
++		    $content .= "        dns-nameservers $default_dns\n";
++		    $content .= "        dns-search $default_search\n";
++		    $dnsinserted++;
++		}
++		##
  	    }
  	}
  	if ($net->{ip6}) {
-@@ -209,19 +224,96 @@ sub configdrive2_network {
+@@ -211,23 +228,103 @@
      return $content;
  }
  
++ 
++# Get mac addresses of dhcp nics from conf file
 +sub get_mac_addresses {
-+    my ($conf) = @_;
++     my ($conf) = @_;
++     
++     my $dhcpstring = undef;
++     my @dhcpmacs = ();
++     my @ifaces = grep { /^net(\d+)$/ } keys %$conf;
++     
++     foreach my $iface (sort @ifaces) {
++         (my $id = $iface) =~ s/^net//;
++         my $net = PVE::QemuServer::parse_net($conf->{$iface});
++         next if !$conf->{"ipconfig$id"};
++         my $ipconfig = PVE::QemuServer::parse_ipconfig($conf->{"ipconfig$id"});
++         
++         my $mac = lc $net->{macaddr};
 +
-+    my $dhcpstring = undef;
-+    my @dhcpmacs = ();
-+    my @ifaces = grep { /^net(\d+)$/ } keys %$conf;
++         if (($ipconfig->{ip}) and ($ipconfig->{ip} eq 'dhcp')){
++             push @dhcpmacs, $mac;
++         }
++     }
 +
-+    foreach my $iface (sort @ifaces) {
-+        (my $id = $iface) =~ s/^net//;
-+        my $net = PVE::QemuServer::parse_net($conf->{$iface});
-+        next if !$conf->{"ipconfig$id"};
-+        my $ipconfig = PVE::QemuServer::parse_ipconfig($conf->{"ipconfig$id"});
-+
-+        my $mac = lc $net->{macaddr};
-+
-+        if (($ipconfig->{ip}) and ($ipconfig->{ip} eq 'dhcp')){
-+            push @dhcpmacs, $mac;
-+        }
-+    }
-+
-+    if (@dhcpmacs){
-+        $dhcpstring = ",\n     \"dhcp\":[";
-+        foreach my $mac (@dhcpmacs){
-+            if ($mac != $dhcpmacs[-1]){
-+                $dhcpstring .= "\"$mac\",";
-+            }
-+            else{
-+                $dhcpstring .= "\"$mac\"]";
-+            }
-+        }
-+    }
-+    return ($dhcpstring);
++     if (@dhcpmacs){
++         $dhcpstring = ",\n     \"dhcp\":[";
++         foreach my $mac (@dhcpmacs){
++             if ($mac != $dhcpmacs[-1]){
++                 $dhcpstring .= "\"$mac\",";
++             }
++             else{
++                 $dhcpstring .= "\"$mac\"]";
++             }
++         }
++     }
++     return ($dhcpstring);
 +}
 +
  sub configdrive2_gen_metadata {
 -    my ($user, $network) = @_;
-+    my ($conf, $vmid, $user, $network) = @_;
-+
-+    # Get mac addresses of dhcp nics from conf file  
-+    my $dhcpmacs = undef;
-+    $dhcpmacs = get_mac_addresses($conf);
++	my ($conf, $vmid, $user, $network) = @_;
  
-+    # Get UUID
++	# Get mac addresses of dhcp nics from conf file  
++	my $dhcpmacs = undef;
++	$dhcpmacs = get_mac_addresses($conf);
++
++	# Get UUID
      my $uuid_str = Digest::SHA::sha1_hex($user.$network);
 -    return configdrive2_metadata($uuid_str);
 +
-+    # Get hostname
-+    my ($hostname, $fqdn) = get_hostname_fqdn($conf, $vmid);
++	# Get hostname
++	my ($hostname, $fqdn) = get_hostname_fqdn($conf, $vmid);
 +
-+    # Get username, default to Administrator if none
-+    my $username = undef;
-+    if (defined($conf->{ciuser})){
++	# Get username, default to Administrator if none
++	my $username = undef;
++	if (defined($conf->{ciuser})){
 +        my $name = $conf->{ciuser};
 +        $username = ",\n        \"admin_username\": \"$name\""
 +    }
 +
-+    # Get user password
-+    my $password = $conf->{cipassword};
++	# Get user password
++	my $password = $conf->{cipassword};
 +
-+    # Get ssh keys and make a list out of it in json format
-+    my $keystring = undef;
-+    my $pubkeys = $conf->{sshkeys};
-+    $pubkeys = URI::Escape::uri_unescape($pubkeys);
-+    my @pubkeysarray = split "\n", $pubkeys;
++	# Get ssh keys and make a list out of it in json format
++	my $keystring = undef;
++	my $pubkeys = $conf->{sshkeys};
++	$pubkeys = URI::Escape::uri_unescape($pubkeys);
++	my @pubkeysarray = split "\n", $pubkeys;
 +    if (@pubkeysarray) {
 +        my $arraylength = @pubkeysarray;
 +        my $incrementer = 1;
@@ -124,7 +130,7 @@
  
  sub configdrive2_metadata {
 -    my ($uuid) = @_;
-+    my ($password, $uuid, $hostname, $username, $pubkeys, $network, $dhcpmacs) = @_;
++	my ($password, $uuid, $hostname, $username, $pubkeys, $network, $dhcpmacs) = @_;
      return <<"EOF";
  {
 -     "uuid": "$uuid",
@@ -138,7 +144,12 @@
  }
  EOF
  }
-@@ -235,7 +327,7 @@ sub generate_configdrive2 {
+ 
++
+ sub generate_configdrive2 {
+     my ($conf, $vmid, $drive, $volname, $storeid) = @_;
+ 
+@@ -237,7 +334,7 @@
      $vendor_data = '' if !defined($vendor_data);
  
      if (!defined($meta_data)) {
@@ -147,12 +158,3 @@
      }
  
      # we always allocate a 4MiB disk for cloudinit and with the overhead of the ISO
-@@ -622,7 +714,7 @@ sub dump_cloudinit_config {
- 	    return nocloud_gen_metadata($user, $network);
- 	} else {
- 	    my $network = configdrive2_network($conf);
--	    return configdrive2_gen_metadata($user, $network);
-+	    return configdrive2_gen_metadata($conf, $vmid, $user, $network);
- 	}
-     }
- }

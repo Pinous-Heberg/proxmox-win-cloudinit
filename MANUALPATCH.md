@@ -37,7 +37,7 @@ if $cipassword !~ /^\$(? :[156]|2[ay])(\$.+){2}/ ;
 ```
 and add this one to check if the operating system type is set to Windows :
 
-``perl5
+```perl5
 if (!(PVE::QemuServer::windows_version($ostype))) {
 		$param->{cipassword} = PVE::Tools::encrypt_pw($cipassword)
 			if $cipassword !~ /^\$(? :[156]|2[ay])(\$.+){2}/ ;

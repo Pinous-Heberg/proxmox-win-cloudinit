@@ -40,7 +40,7 @@ If you want to revert the patch:
 `patch --force --reverse --backup -p0 --directory / --input "/absolute/path/to/patchfile.pm.patch"`
 ```
 
-If you want to apply the patch manually you can follow these steps: [Manual Patching](https://git.geco-it.net/c.soylu/Geco-cloudbase-init/src/branch/master/MANUALPATCH.md)
+If you want to apply the patch manually you can follow these steps: [Manual Patching](https://github.com/codding-nepale/proxmox-win-cloudinit/blob/main/MANUALPATCH.md)
 
 ## Windows VM Configuration
 * Create a Windows VM in proxmox

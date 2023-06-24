@@ -22,7 +22,7 @@ There is two files that we need to modify Qemu.pm and Cloudinit.pm.
 
 ## Install Proxmox patch
 
-### ⚠️ The patch has been tested and approved for proxmox version 8.0.3 please make a backup of both Cloudinit.pm stored in ```
+### ⚠️ The patch has been tested and approved for proxmox version 8.0.3 please make a backup of both Cloudinit.pm stored in
 ```/usr/share/perl5/PVE/QemuServer/Cloudinit.pm``` and Qemu.pm stored in ```/usr/share/perl5/PVE/API2/Qemu.pm``` if you are trying to apply the patch in a version prior to proxmox 8.0.3 or higher.
 
 # Launch below as a test to see if you can apply the patch file, change path to where you downloaded the files and run this for two .patch files.

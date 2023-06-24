@@ -57,6 +57,9 @@ Why Continous Build? Because the stable build dates from 2020 and doesn't includ
 We have [five scripts](https://github.com/codding-nepale/proxmox-win-cloudinit/tree/main/localscripts) that do some fonctionality that Cloudbase-Init doesnt have;
 * Enabling administrator user when it's name is given to the Cloudbase-Init.
 * Enabling DHCP on the network adapters.
+* Update the dns with those set in the cloud-init configuration
+* Update the system on startup (may slow down VM startup time)
+* Eject the cloud-init disk after all the steps performed at startup.
 
 Move those scripts into Cloudbase Solutions\Cloudbase-Init\LocalScripts\ in your program files of your Windows VM.
 

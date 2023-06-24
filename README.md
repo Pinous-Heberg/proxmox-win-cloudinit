@@ -29,9 +29,9 @@ There is two files that we need to modify Qemu.pm and Cloudinit.pm.
 patch --force --forward --backup -p0 --directory / --input "/absolute/path/to/patchfile.pm.patch" --dry-run && echo "You can apply patch" || { echo "Can't apply patch!";}
 ```
 
-# If the result is "Can't apply patch!", you can type "apt reinstall qemu-server" to reinstall the qemu-server files(If you have made changes to qemu-server source files they will be lost!)
+## If the result is "Can't apply patch!", you can type "apt reinstall qemu-server" to reinstall the qemu-server files(If you have made changes to qemu-server source files they will be lost!)
 
-# Apply the patch if the result is "You can apply patch"
+## Apply the patch if the result is "You can apply patch"
 ```sh
 patch --force --forward --backup -p0 --directory / --input "/absolute/path/to/patchfile.pm.patch"
 ```

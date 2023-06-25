@@ -19,8 +19,3 @@ Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\cloudbase-init' 
 # Remove a microsoft store language package that causes generelazing issues
 
 Get-AppxPackage | Where-Object {$_.name -Like "*Language*"} | Remove-AppxPackage
-Cette page est en Anglais
-Traduire en Français 
-Toujours traduire de Anglais à Français
-Ne jamais traduire Anglais
-Ne jamais traduire git.geco-it.net

@@ -9,6 +9,7 @@ Use Cloudbase-Init with Windows VMs to:
 * Set static ip or dhcp on network adapters.
 * Set DNS on network adapters.
 * Automatic VM update on boot
+* Active RDP
 * Set machine hostname.
 * Insert public ssh keys to "user/.ssh/authorized_keys" file of created/enabled user.
 * Expand partition volumes automatically when there's a resized disk.

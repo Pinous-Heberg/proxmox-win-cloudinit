@@ -42,6 +42,11 @@ patch --force --reverse --backup -p0 --directory / --input "/absolute/path/to/pa
 
 If you want to apply the patch manually you can follow these steps: [Manual Patching](https://github.com/codding-nepale/proxmox-win-cloudinit/blob/main/MANUALPATCH.md)
 
+After installing patch execute this command:
+```sh
+service pvedaemon restart
+```
+
 ## Windows VM Configuration
 * Create a Windows VM in proxmox
 * Go to Hardware section of your VM, add Cloud-Init Drive and Serial Port 0

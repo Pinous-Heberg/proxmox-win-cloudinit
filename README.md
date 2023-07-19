@@ -92,6 +92,6 @@ Run this script after installing and configuring Cloudbase-Init Continous Build.
 When everything is installed simply run below in powershell to launch sysprep:
 
 ```sh
-cd ‘C:\Program Files\Cloudbase Solutions\Cloudbase-Init\conf’
+cd "C:\Program Files\Cloudbase Solutions\Cloudbase-Init\conf"
 C:\Windows\System32\sysprep\sysprep.exe /generalize /oobe /unattend:Unattend.xml
 ```

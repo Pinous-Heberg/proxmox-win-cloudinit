@@ -72,6 +72,11 @@ We have [five scripts](https://github.com/codding-nepale/proxmox-win-cloudinit/t
 Move those scripts into Cloudbase Solutions\Cloudbase-Init\LocalScripts\ in your program files of your Windows VM.
 
 ## If you were using the update script, please run these two commands before running the SysPrep:
+### ⚠️ If you are running cloudbase-init on Windows Server 2016, please run these commands before running the commands to install "PSWindowsUpdate":
+```ps1
+Set-ItemProperty -Path ‘HKLM:\SOFTWARE\Wow6432Node\Microsoft\.NetFramework\v4.0.30319’ -Name ‘SchUseStrongCrypto’ -Value ‘1’ -Type DWord
+Set-ItemProperty -Path ‘HKLM:\SOFTWARE\Microsoft\.NetFramework\v4.0.30319’ -Name ‘SchUseStrongCrypto’ -Value ‘1’ -Type DWord
+```
 ```ps1
 Install-Module PSWindowsUpdate -Force -AllowClobber
 Import-Module PSWindowsUpdate

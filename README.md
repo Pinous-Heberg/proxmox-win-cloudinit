@@ -52,7 +52,7 @@ service pvedaemon restart
 * Create a Windows VM in proxmox
 * Go to Hardware section of your VM, add Cloud-Init Drive and Serial Port 0
 
-# ⚠️ For non-server versions of Windows, please press CTRL + SHIFT + F3 when configuring the network and the user to switch to constructor mode, which will allow you to run the Sysprep at the end of this tutorial.
+###⚠️ For non-server versions of Windows, please press CTRL + SHIFT + F3 when configuring the network and the user to switch to constructor mode, which will allow you to run the Sysprep at the end of this tutorial.
 
 Then configure Windows to your needs and proceed to Cloudbase-Init installation.
 

@@ -1,6 +1,5 @@
 # Install OpenSSH Server from Windows' optional features
 
-Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH*'
 Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
 
 Get-WindowsCapability -Online | Where-Object Name -like 'OpenSSH.Serv*' | Select-Object -ExpandProperty Name | %{Add-WindowsCapability -Online -Name $_}

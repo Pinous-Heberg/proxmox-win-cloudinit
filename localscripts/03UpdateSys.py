@@ -1,5 +1,6 @@
 import subprocess
 import os
+import wmi
 
 def get_disk_letter_from_name(disk_name):
     c = wmi.WMI()

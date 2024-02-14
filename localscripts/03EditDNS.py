@@ -23,12 +23,22 @@ def get_dns_from_file(file_path):
 
 def set_dns(dns_servers):
     if dns_servers is not None:
-        ps_command = "Set-DnsClientServerAddress -InterfaceAlias 'Ethernet' -ServerAddresses '{}' -PassThru".format("', '".join(dns_servers))
-        subprocess.call(["powershell.exe", ps_command])
-        print("DNS set to:", dns_servers)
+        for dns_server in dns_servers:
+            ps_command_ipv4 = "Set-DnsClientServerAddress -InterfaceAlias 'Ethernet' -ServerAddresses '{}' -PassThru".format(dns_server)
+            subprocess.call(["powershell.exe", ps_command_ipv4])
+            print("IPv4 DNS set to:", dns_server)
+
+            # check if is IPv6 with content :
+            if ':' in dns_server:
+                ps_command_ipv6 = "Set-DnsClientServerAddress -InterfaceAlias 'Ethernet' -ServerAddresses '{}' -PassThru".format(dns_server)
+                subprocess.call(["powershell.exe", ps_command_ipv6])
+                print("IPv6 DNS set to:", dns_server)
+            else:
+                ps_command_ipv6 = "Set-DnsClientServerAddress -InterfaceAlias 'Ethernet' -ServerAddresses '2606:4700:4700::1111', '2606:4700:4700::1001' -PassThru"
+                subprocess.call(["powershell.exe", ps_command_ipv6])
+                print("IPv6 DNS set to:", ['2606:4700:4700::1111', '2606:4700:4700::1001'])
     else:
         print("No DNS servers found.")
-
 disk_name = "config-2"
 disk_letter = get_disk_letter_from_name(disk_name)
 if disk_letter is None:

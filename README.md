@@ -67,7 +67,7 @@ We have [five scripts](https://github.com/codding-nepale/proxmox-win-cloudinit/t
 * Enabling DHCP on the network adapters.
 * Update the dns with those set in the cloud-init configuration
 * Update the system on startup (may slow down VM startup time)
-* Eject the cloud-init disk after all the steps performed at startup.
+* Eject the cloud-init disk after all the steps performed at startup (optional).
 
 Move those scripts into Cloudbase Solutions\Cloudbase-Init\LocalScripts\ in your program files of your Windows VM.
 

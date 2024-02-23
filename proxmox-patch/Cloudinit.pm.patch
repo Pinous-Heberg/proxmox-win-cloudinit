@@ -1,5 +1,5 @@
---- /usr/share/perl5/PVE/QemuServer/Cloudinit.pm.orign	2023-06-24 14:38:04.430019560 +0200
-+++ /usr/share/perl5/PVE/QemuServer/Cloudinit.pm	2023-06-24 14:52:20.325538276 +0200
+--- /root/Cloudinit.pm	2024-02-23 21:13:58.649087887 +0100
++++ /usr/share/perl5/PVE/QemuServer/Cloudinit.pm	2023-11-26 15:32:10.426503017 +0100
 @@ -166,14 +166,24 @@
      my $content = "auto lo\n";
      $content .= "iface lo inet loopback\n\n";

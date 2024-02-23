@@ -1,4 +1,3 @@
-```markdown
 ## Manual Patching Instructions
 
 ### Qemu.pm
@@ -130,4 +129,3 @@
     ```perl5
     $meta_data = configdrive2_gen_metadata($conf, $vmid, $user_data, $network_data);
     ```
-```

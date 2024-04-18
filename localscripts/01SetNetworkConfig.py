@@ -10,12 +10,19 @@ def get_disk_letter_from_name(disk_name):
     return None
 
 def get_set_ipv6_and_gateway_from_network_config():
-    ps_command = "Get-NetIPAddress -InterfaceAlias 'Ethernet' -AddressFamily IPv6"
-    output = subprocess.check_output(["powershell.exe", ps_command])
-    lines = output.decode('utf-8').split('\r\n')
     ipv6_addresses = []
     gateway = None
+    ps_command = "Get-NetIPAddress -InterfaceAlias 'Ethernet' -AddressFamily IPv6"
+    try:
+        output = subprocess.check_output(["powershell.exe", ps_command])
+    except subprocess.CalledProcessError as e:
+        print(f"Error executing PowerShell command: {e}")
+        return ipv6_addresses, gateway
+    lines = output.decode('utf-8').split('\r\n')
+
     for line in lines:
+        if 'SELECT * FROM MSFT_NetIPAddress  WHERE ((InterfaceAlias LIKE \'Ethernet\')) AND ((AddressFamily = 23))' in line:
+            return ipv6_addresses, gateway
         if 'Address' in line:
             parts = line.split()
             for part in parts:
@@ -27,8 +34,12 @@ def get_set_ipv6_and_gateway_from_network_config():
                 if parts[i] == 'Preferred':
                     if i+1 < len(parts) and ':' in parts[i+1] and parts[i+1].count(':') > 1:
                         gateway = parts[i+1] if i+1 < len(parts) else None
+        if 'PrefixOrigin' in line:
+            if 'RouterAdvertisement' in line:
+                print("IPv6 addresses and gateway is not set.")
+                gateway = None
+                ipv6_addresses = None
     return ipv6_addresses, gateway
-
 def get_ipv6_and_gateway_from_file(file_path):
     ipv6_addresses = []
     gateway = None
@@ -50,18 +61,18 @@ def set_ipv6(ipv6_addresses, gateway):
     if ipv6_addresses != get_set_ipv6_and_gateway_from_network_config()[0]:
         ps_command = "Remove-NetIPAddress -InterfaceAlias 'Ethernet' -AddressFamily IPv6 -Confirm:$false"
         subprocess.call(["powershell.exe", ps_command])
+        ps_command_remove = "Remove-NetRoute -InterfaceAlias 'Ethernet' -AddressFamily IPv6 -Confirm:$false"
+        subprocess.call(["powershell.exe", ps_command_remove])
         print("IPv6 addresses removed from network config.")
-        
-        ps_command = "New-NetIPAddress -InterfaceAlias 'Ethernet' -IPAddress {} -PrefixLength 64".format(','.join(ipv6_addresses))
+        ps_command = "New-NetIPAddress -InterfaceAlias 'Ethernet' -AddressFamily IPv6 -IPAddress {} -PrefixLength 64".format(','.join(ipv6_addresses))
         subprocess.call(["powershell.exe", ps_command])
-        
-        ps_command_gateway = "New-NetRoute -InterfaceAlias 'Ethernet' -DestinationPrefix ::/0 -NextHop {}".format(gateway)
+        ps_command_gateway = "New-NetRoute -InterfaceAlias 'Ethernet' -AddressFamily IPv6 -DestinationPrefix ::/0 -NextHop {}".format(gateway)
         subprocess.call(["powershell.exe", ps_command_gateway])
         print("IPv6 addresses and gateway set successfully.")
     else:
         print("IPv6 addresses and gateway already set in network config.")
-    
-def get_set_ipv4_and_gateway_from_network_config():
+        
+def get_set_ipv4_and_gateway_from_network_config(): 
     ps_command = "Get-NetIPAddress -InterfaceAlias 'Ethernet' -AddressFamily IPv4"
     output = subprocess.check_output(["powershell.exe", ps_command])
     lines = output.decode('utf-8').split('\r\n')
@@ -103,16 +114,27 @@ def set_ipv4(ipv4_addresses, gateway):
     if ipv4_addresses != get_set_ipv4_and_gateway_from_network_config()[0]:
         ps_command = "Remove-NetIPAddress -InterfaceAlias 'Ethernet' -AddressFamily IPv4 -Confirm:$false"
         subprocess.call(["powershell.exe", ps_command])
+        ps_command_remove = "Remove-NetRoute -InterfaceAlias 'Ethernet' -AddressFamily IPv4 -Confirm:$false"
+        subprocess.call(["powershell.exe", ps_command_remove])
         print("IPv4 addresses removed from network config.")
         
-        ps_command = "New-NetIPAddress -InterfaceAlias 'Ethernet' -IPAddress {} -PrefixLength 24".format(','.join(ipv4_addresses))
+        ps_command = "New-NetIPAddress -InterfaceAlias 'Ethernet' -AddressFamily IPv4 -IPAddress {} -PrefixLength 24".format(','.join(ipv4_addresses))
         subprocess.call(["powershell.exe", ps_command])
-        
-        ps_command_gateway = "New-NetRoute -InterfaceAlias 'Ethernet' -DestinationPrefix 0.0.0.0/0 -NextHop {}".format(gateway)
+
+        ps_command_gateway = "New-NetRoute -InterfaceAlias 'Ethernet' -AddressFamily IPv4 -DestinationPrefix 0.0.0.0/0 -NextHop {}".format(gateway)
         subprocess.call(["powershell.exe", ps_command_gateway])
+
         print("IPv4 addresses and gateway set successfully.")
     else:
         print("IPv4 addresses and gateway already set in network config.")
+
+def set_dns():
+    ps_command_ipv4 = "Set-DnsClientServerAddress -InterfaceAlias 'Ethernet' -ServerAddresses '1.1.1.1', '1.0.0.1' -PassThru"
+    subprocess.call(["powershell.exe", ps_command_ipv4])
+    print("IPv4 DNS set to: 1.1.1.1, 1.0.0.1")
+    ps_command_ipv6 = "Set-DnsClientServerAddress -InterfaceAlias 'Ethernet' -ServerAddresses '2606:4700:4700::1111', '2606:4700:4700::1001' -PassThru"
+    subprocess.call(["powershell.exe", ps_command_ipv6])
+    print("IPv6 DNS set to:", ['2606:4700:4700::1111', '2606:4700:4700::1001'])
 
 disk_name = "config-2"
 disk_letter = get_disk_letter_from_name(disk_name)
@@ -123,8 +145,8 @@ if disk_letter is None:
 file_path = r"{}:\OPENSTACK\CONTENT\0000".format(disk_letter)
 ipv4_addresses, gateway = get_ipv4_and_gateway_from_file(file_path)
 set_ipv4(ipv4_addresses, gateway)
-
-ipv6_addresses, gateway = get_ipv6_and_gateway_from_file(file_path)
-set_ipv6(ipv6_addresses, gateway)
+ipv6_addresses, gateway6 = get_ipv6_and_gateway_from_file(file_path)
+set_ipv6(ipv6_addresses, gateway6)
+set_dns()
 
 sys.exit(0)

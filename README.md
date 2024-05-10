@@ -1,5 +1,5 @@
 # proxmox-win-cloudinit
-## ⚠️This project doesn't belong to me. The github repository is just a fork of [Gecko-IT](https://git.geco-it.net/GECO-IT-PUBLIC/Geco-Cloudbase-Init) which is at the origin of this project but which doesn't keep it up to date anymore, that's why I decided to keep it up to date with proxmox v8 which has just been released.
+## ⚠️This project does not belong to us. The github repository is just a fork of [Gecko-IT](https://git.geco-it.net/GECO-IT-PUBLIC/Geco-Cloudbase-Init) which is at the origin of this project but which does not maintain it any more up to date, this is why we decided to maintain it up to date on the current version proxmox.
 This is an implementation of Cloudbase-Init to Windows virtual machines running in a Proxmox Node in order to use cloud-init with those vms.
 
 What can you do with this implementation?
@@ -23,7 +23,7 @@ There is two files that we need to modify Qemu.pm and Cloudinit.pm.
 
 ## Install Proxmox patch
 
-### ⚠️ The patch has been tested and approved for proxmox version 8.0.3 please make a backup of both Cloudinit.pm stored in ```/usr/share/perl5/PVE/QemuServer/Cloudinit.pm``` and Qemu.pm stored in ```/usr/share/perl5/PVE/API2/Qemu.pm``` if you are trying to apply the patch in a version prior to proxmox 8.0.3 or higher.
+### ⚠️ The patch has been tested and approved for proxmox version 8.2.2 please make a backup of both Cloudinit.pm stored in ```/usr/share/perl5/PVE/QemuServer/Cloudinit.pm``` and Qemu.pm stored in ```/usr/share/perl5/PVE/API2/Qemu.pm``` if you are trying to apply the patch in a version prior to proxmox 8.2.2 or higher.
 
 ## Launch below as a test to see if you can apply the patch file, change path to where you downloaded the files and run this for two .patch files.
 ```sh

@@ -1,49 +1,36 @@
---- /root/Cloudinit.pm	2024-02-23 21:13:58.649087887 +0100
-+++ /usr/share/perl5/PVE/QemuServer/Cloudinit.pm	2023-11-26 15:32:10.426503017 +0100
-@@ -166,14 +166,24 @@
-     my $content = "auto lo\n";
+--- Cloudinit.origin.pm	2024-07-19 16:08:55.339448000 +0200
++++ Cloudinit.pm	2024-07-19 16:24:38.083052359 +0200
+@@ -167,15 +167,26 @@
      $content .= "iface lo inet loopback\n\n";
  
--    my ($searchdomains, $nameservers) = get_dns_conf($conf);
-+    my ($searchdomains, $nameservers) = get_dns_conf($conf); 
-+
-+	## support windows
+     my ($searchdomains, $nameservers) = get_dns_conf($conf);
 +	my $ostype = $conf->{"ostype"};
 +	my $default_dns = '';
 +	my $default_search = '';
-+	##
 +	my $dnsinserted = 0; # insert dns just once for the machine
-+
      if ($nameservers && @$nameservers) {
  	$nameservers = join(' ', @$nameservers);
  	$content .= "        dns_nameservers $nameservers\n";
-+	$default_dns = $nameservers; # Support windows
++	$default_dns = $nameservers; # Windows support
      }
      if ($searchdomains && @$searchdomains) {
  	$searchdomains = join(' ', @$searchdomains);
  	$content .= "        dns_search $searchdomains\n";
-+	$default_search = $searchdomains; # Support Windows
      }
  
++	if(PVE::QemuServer::windows_version($ostype) && not($dnsinserted)) {
++    $content .= " dns-nameservers $default_dns\n";
++    $content .= " dns-search $default_search\n";
++    $dnsinserted++;
++	}
++
      my @ifaces = grep { /^net(\d+)$/ } keys %$conf;
-@@ -193,6 +203,13 @@
- 		$content .= "        address $addr\n";
- 		$content .= "        netmask $mask\n";
- 		$content .= "        gateway $net->{gw}\n" if $net->{gw};
-+		## Support Windows
-+		if(PVE::QemuServer::windows_version($ostype) && not($dnsinserted)) {
-+		    $content .= "        dns-nameservers $default_dns\n";
-+		    $content .= "        dns-search $default_search\n";
-+		    $dnsinserted++;
-+		}
-+		##
- 	    }
- 	}
- 	if ($net->{ip6}) {
-@@ -211,23 +228,103 @@
+     foreach my $iface (sort @ifaces) {
+ 	(my $id = $iface) =~ s/^net//;
+@@ -210,20 +221,59 @@
+ 
      return $content;
  }
- 
 + 
 +# Get mac addresses of dhcp nics from conf file
 +sub get_mac_addresses {
@@ -79,53 +66,14 @@
 +     }
 +     return ($dhcpstring);
 +}
-+
+ 
  sub configdrive2_gen_metadata {
 -    my ($user, $network) = @_;
-+	my ($conf, $vmid, $user, $network) = @_;
++	my ($conf, $vmid, $user, $network) = @_ ;
  
-+	# Get mac addresses of dhcp nics from conf file  
-+	my $dhcpmacs = undef;
-+	$dhcpmacs = get_mac_addresses($conf);
-+
-+	# Get UUID
      my $uuid_str = Digest::SHA::sha1_hex($user.$network);
 -    return configdrive2_metadata($uuid_str);
-+
-+	# Get hostname
-+	my ($hostname, $fqdn) = get_hostname_fqdn($conf, $vmid);
-+
-+	# Get username, default to Administrator if none
-+	my $username = undef;
-+	if (defined($conf->{ciuser})){
-+        my $name = $conf->{ciuser};
-+        $username = ",\n        \"admin_username\": \"$name\""
-+    }
-+
-+	# Get user password
-+	my $password = $conf->{cipassword};
-+
-+	# Get ssh keys and make a list out of it in json format
-+	my $keystring = undef;
-+	my $pubkeys = $conf->{sshkeys};
-+	$pubkeys = URI::Escape::uri_unescape($pubkeys);
-+	my @pubkeysarray = split "\n", $pubkeys;
-+    if (@pubkeysarray) {
-+        my $arraylength = @pubkeysarray;
-+        my $incrementer = 1;
-+        $keystring =",\n     \"public_keys\": {\n";
-+        for my $key (@pubkeysarray){
-+            $keystring .= "        \"SSH${incrementer}\" : \"${key}\"";
-+            if ($arraylength != $incrementer){
-+                $keystring .= ",\n";
-+            }else{
-+                $keystring .= "\n     }";
-+            }
-+            $incrementer++;
-+        }
-+    }
-+
-+    return configdrive2_metadata($password, $uuid_str, $hostname, $username, $keystring, $network, $dhcpmacs);
++	return configdrive2_metadata($conf, $vmid, $user, $network);
  }
  
  sub configdrive2_metadata {
@@ -135,21 +83,16 @@
  {
 -     "uuid": "$uuid",
 -     "network_config": { "content_path": "/content/0000" }
-+     "meta":{
-+        "admin_pass": "$password"$username
-+     },
-+     "uuid":"$uuid",
-+     "hostname":"$hostname",
-+     "network_config":{"content_path":"/content/0000"}$pubkeys$dhcpmacs
++    "meta":{
++    	"admin_pass": "$password"$username
++	},
++	"uuid":"$uuid",
++	"hostname":"$hostname",
++	"network_config":{"content_path":"/content/0000"}$pubkeys$dhcpmacs
  }
  EOF
  }
- 
-+
- sub generate_configdrive2 {
-     my ($conf, $vmid, $drive, $volname, $storeid) = @_;
- 
-@@ -237,7 +334,7 @@
+@@ -237,7 +287,7 @@
      $vendor_data = '' if !defined($vendor_data);
  
      if (!defined($meta_data)) {

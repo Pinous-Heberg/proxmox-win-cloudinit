@@ -1,23 +1,23 @@
---- /root/Qemu.pm	2024-02-23 21:05:12.227337832 +0100
-+++ /usr/share/perl5/PVE/API2/Qemu.pm	2023-11-26 15:30:57.350290102 +0100
-@@ -1545,12 +1545,18 @@
+--- Qemu.origin.pm	2024-07-19 16:05:16.108435000 +0200
++++ Qemu.pm	2024-07-19 16:14:02.975694726 +0200
+@@ -1667,13 +1667,17 @@
+     my $digest = extract_param($param, 'digest');
  
      my $background_delay = extract_param($param, 'background_delay');
- 
 +	my $conf = PVE::QemuConfig->load_config($vmid);
-+
 +	my $ostype = $conf->{ostype};
-+
+ 
      my $skip_cloud_init = extract_param($param, 'skip_cloud_init');
  
      if (defined(my $cipassword = $param->{cipassword})) {
- 	# Same logic as in cloud-init (but with the regex fixed...)
+-	# Same logic as in cloud-init (but with the regex fixed...)
 -	$param->{cipassword} = PVE::Tools::encrypt_pw($cipassword)
 -	    if $cipassword !~ /^\$(?:[156]|2[ay])(\$.+){2}/;
-+	if (!(PVE::QemuServer::windows_version($ostype))) {
-+		$param->{cipassword} = PVE::Tools::encrypt_pw($cipassword)
-+			if $cipassword !~ /^\$(?:[156]|2[ay])(\$.+){2}/;
-+	}
++		# Same logic as in cloud-init (but with the regex fixed...)
++		if (!(PVE::QemuServer::windows_version($ostype))) {
++			$param->{cipassword} = PVE::Tools::encrypt_pw($cipassword)
++				if $cipassword !~ /^\$(?:[156]|2[ay])(\$.+){2}/;
++		}
      }
  
      my @paramarr = (); # used for log message

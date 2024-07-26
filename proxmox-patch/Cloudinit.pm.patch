@@ -1,6 +1,6 @@
---- Cloudinit.origin.pm	2024-07-19 16:08:55.339448000 +0200
-+++ Cloudinit.pm	2024-07-19 16:24:38.083052359 +0200
-@@ -167,15 +167,26 @@
+--- /usr/share/perl5/PVE/QemuServer/Cloudinit.origin.pm	2024-07-19 16:08:55.339448000 +0200
++++ /usr/share/perl5/PVE/QemuServer/Cloudinit.pm	2024-07-25 18:19:53.306142848 +0200
+@@ -167,13 +167,19 @@
      $content .= "iface lo inet loopback\n\n";
  
      my ($searchdomains, $nameservers) = get_dns_conf($conf);
@@ -16,22 +16,26 @@
      if ($searchdomains && @$searchdomains) {
  	$searchdomains = join(' ', @$searchdomains);
  	$content .= "        dns_search $searchdomains\n";
++	$default_search = $searchdomains; # Windows support
      }
  
-+	if(PVE::QemuServer::windows_version($ostype) && not($dnsinserted)) {
-+    $content .= " dns-nameservers $default_dns\n";
-+    $content .= " dns-search $default_search\n";
-+    $dnsinserted++;
-+	}
-+
      my @ifaces = grep { /^net(\d+)$/ } keys %$conf;
-     foreach my $iface (sort @ifaces) {
- 	(my $id = $iface) =~ s/^net//;
-@@ -210,20 +221,59 @@
- 
+@@ -193,6 +199,11 @@
+ 		$content .= "        address $addr\n";
+ 		$content .= "        netmask $mask\n";
+ 		$content .= "        gateway $net->{gw}\n" if $net->{gw};
++		if(PVE::QemuServer::windows_version($ostype) && not($dnsinserted)) {
++		$content .= " dns-nameservers $default_dns\n";
++		$content .= " dns-search $default_search\n";
++		$dnsinserted++;
++		}
+ 	    }
+ 	}
+ 	if ($net->{ip6}) {
+@@ -211,19 +222,99 @@
      return $content;
  }
-+ 
+ 
 +# Get mac addresses of dhcp nics from conf file
 +sub get_mac_addresses {
 +     my ($conf) = @_;
@@ -66,33 +70,74 @@
 +     }
 +     return ($dhcpstring);
 +}
- 
++
++
  sub configdrive2_gen_metadata {
 -    my ($user, $network) = @_;
-+	my ($conf, $vmid, $user, $network) = @_ ;
++	my ($conf, $vmid, $user, $network) = @_;
  
++	# Get mac addresses of dhcp nics from conf file  
++	my $dhcpmacs = undef;
++	$dhcpmacs = get_mac_addresses($conf);
++
++	# Get UUID
      my $uuid_str = Digest::SHA::sha1_hex($user.$network);
 -    return configdrive2_metadata($uuid_str);
-+	return configdrive2_metadata($conf, $vmid, $user, $network);
++
++	# Get hostname
++	my ($hostname, $fqdn) = get_hostname_fqdn($conf, $vmid);
++
++	# Get username, default to Administrator if none
++	my $username = undef;
++	if (defined($conf->{ciuser})){
++        my $name = $conf->{ciuser};
++        $username = ",\n        \"admin_username\": \"$name\","
++    }
++
++	# Get user password
++	my $password = $conf->{cipassword};
++
++	# Get ssh keys and make a list out of it in json format
++	# my $keystring = undef;
++	# my $pubkeys = $conf->{sshkeys};
++	# $pubkeys = URI::Escape::uri_unescape($pubkeys);
++	# my @pubkeysarray = split "\n", $pubkeys;
++    # if (@pubkeysarray) {
++    #     my $arraylength = @pubkeysarray;
++    #     my $incrementer = 1;
++    #     $keystring =",\n     \"public_keys\": {\n";
++    #     for my $key (@pubkeysarray){
++    #         $keystring .= "        \"SSH${incrementer}\" : \"${key}\"";
++    #         if ($arraylength != $incrementer){
++    #             $keystring .= ",\n";
++    #         }else{
++    #             $keystring .= "\n     }";
++    #         }
++    #         $incrementer++;
++    #     }
++    # }
++
++    return configdrive2_metadata($password, $uuid_str, $hostname, $username, $network, $dhcpmacs);
  }
  
++
  sub configdrive2_metadata {
 -    my ($uuid) = @_;
-+	my ($password, $uuid, $hostname, $username, $pubkeys, $network, $dhcpmacs) = @_;
++	my ($password, $uuid, $hostname, $username, $network, $dhcpmacs) = @_;
      return <<"EOF";
  {
 -     "uuid": "$uuid",
 -     "network_config": { "content_path": "/content/0000" }
-+    "meta":{
-+    	"admin_pass": "$password"$username
-+	},
-+	"uuid":"$uuid",
-+	"hostname":"$hostname",
-+	"network_config":{"content_path":"/content/0000"}$pubkeys$dhcpmacs
++"meta":{
++    "admin_pass": "$password"$username 
++},
++"uuid":"$uuid",
++"hostname":"$hostname",
++"network_config":{"content_path":"/content/0000"}$dhcpmacs
  }
  EOF
  }
-@@ -237,7 +287,7 @@
+@@ -237,7 +328,7 @@
      $vendor_data = '' if !defined($vendor_data);
  
      if (!defined($meta_data)) {

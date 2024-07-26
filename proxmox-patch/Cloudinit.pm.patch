@@ -1,5 +1,5 @@
 --- /usr/share/perl5/PVE/QemuServer/Cloudinit.origin.pm	2024-07-19 16:08:55.339448000 +0200
-+++ /usr/share/perl5/PVE/QemuServer/Cloudinit.pm	2024-07-25 18:19:53.306142848 +0200
++++ /usr/share/perl5/PVE/QemuServer/Cloudinit.pm	2024-07-26 13:41:17.401922746 +0200
 @@ -167,13 +167,19 @@
      $content .= "iface lo inet loopback\n\n";
  
@@ -91,7 +91,7 @@
 +	my $username = undef;
 +	if (defined($conf->{ciuser})){
 +        my $name = $conf->{ciuser};
-+        $username = ",\n        \"admin_username\": \"$name\","
++        $username = ",\n        \"admin_username\": \"$name\""
 +    }
 +
 +	# Get user password

@@ -56,7 +56,7 @@ crontab -e
 ```
 And add this in crontab :
 ```sh
-0 5 * * * bash /opt/checkupdate.sh
+0 5 * * * bash /opt/checkupdate.sh -y
 ```
 
 ## Windows VM Configuration

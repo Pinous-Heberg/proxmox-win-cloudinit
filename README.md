@@ -48,6 +48,17 @@ After installing the patch, run the following command to restart the pve daemon 
 service pvedaemon restart
 ```
 
+You can run auto update cron job if qemu-server version change with the following commands:
+```sh
+wget https://raw.githubusercontent.com/Pinous-Heberg/proxmox-win-cloudinit/main/proxmox-patch/checkupdate.sh -O /opt/checkupdate.sh
+chmod +x /opt/checkupdate.sh
+crontab -e
+```
+And add this in crontab :
+```sh
+0 5 * * * bash /opt/checkupdate.sh
+```
+
 ## Windows VM Configuration
 * Create a Windows VM in proxmox
 * Go to Hardware section of your VM, add Cloud-Init Drive and Serial Port 0

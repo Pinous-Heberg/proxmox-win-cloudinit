@@ -12,9 +12,12 @@ def get_disk_letter_from_name(disk_name):
 def get_set_ipv6_and_gateway_from_network_config():
     ipv6_addresses = []
     gateway = None
-    ps_command = "Get-NetIPAddress -InterfaceAlias 'Ethernet' -AddressFamily IPv6"
+    ps_command = "Get-NetIPAddress -InterfaceAlias 'Ethernet'"
     try:
         output = subprocess.check_output(["powershell.exe", ps_command])
+        # evite que le powershell ne fasse une erreur si il n'y a pas d'adresse IPv6
+        if 'Address' not in output.decode('utf-8'):
+            return ipv6_addresses, gateway
     except subprocess.CalledProcessError as e:
         print(f"Error executing PowerShell command: {e}")
         return ipv6_addresses, gateway
@@ -58,19 +61,22 @@ def get_ipv6_and_gateway_from_file(file_path):
     return ipv6_addresses, gateway
 
 def set_ipv6(ipv6_addresses, gateway):
-    if ipv6_addresses != get_set_ipv6_and_gateway_from_network_config()[0]:
-        ps_command = "Remove-NetIPAddress -InterfaceAlias 'Ethernet' -AddressFamily IPv6 -Confirm:$false"
-        subprocess.call(["powershell.exe", ps_command])
-        ps_command_remove = "Remove-NetRoute -InterfaceAlias 'Ethernet' -AddressFamily IPv6 -Confirm:$false"
-        subprocess.call(["powershell.exe", ps_command_remove])
-        print("IPv6 addresses removed from network config.")
-        ps_command = "New-NetIPAddress -InterfaceAlias 'Ethernet' -AddressFamily IPv6 -IPAddress {} -PrefixLength 64".format(','.join(ipv6_addresses))
-        subprocess.call(["powershell.exe", ps_command])
-        ps_command_gateway = "New-NetRoute -InterfaceAlias 'Ethernet' -AddressFamily IPv6 -DestinationPrefix ::/0 -NextHop {}".format(gateway)
-        subprocess.call(["powershell.exe", ps_command_gateway])
-        print("IPv6 addresses and gateway set successfully.")
+    if ipv6_addresses:
+        if ipv6_addresses != get_set_ipv6_and_gateway_from_network_config()[0]:
+            ps_command = "Remove-NetIPAddress -InterfaceAlias 'Ethernet' -AddressFamily IPv6 -Confirm:$false"
+            subprocess.call(["powershell.exe", ps_command])
+            ps_command_remove = "Remove-NetRoute -InterfaceAlias 'Ethernet' -AddressFamily IPv6 -Confirm:$false"
+            subprocess.call(["powershell.exe", ps_command_remove])
+            print("IPv6 addresses removed from network config.")
+            ps_command = "New-NetIPAddress -InterfaceAlias 'Ethernet' -AddressFamily IPv6 -IPAddress {} -PrefixLength 64".format(','.join(ipv6_addresses))
+            subprocess.call(["powershell.exe", ps_command])
+            ps_command_gateway = "New-NetRoute -InterfaceAlias 'Ethernet' -AddressFamily IPv6 -DestinationPrefix ::/0 -NextHop {}".format(gateway)
+            subprocess.call(["powershell.exe", ps_command_gateway])
+            print("IPv6 addresses and gateway set successfully.")
+        else:
+            print("IPv6 addresses and gateway already set in network config.")
     else:
-        print("IPv6 addresses and gateway already set in network config.")
+        print("No IPv6 detected")
         
 def get_set_ipv4_and_gateway_from_network_config(): 
     ps_command = "Get-NetIPAddress -InterfaceAlias 'Ethernet' -AddressFamily IPv4"
@@ -111,24 +117,32 @@ def get_ipv4_and_gateway_from_file(file_path):
     return ipv4_addresses, gateway
 
 def set_ipv4(ipv4_addresses, gateway):
-    if ipv4_addresses != get_set_ipv4_and_gateway_from_network_config()[0]:
-        ps_command = "Remove-NetIPAddress -InterfaceAlias 'Ethernet' -AddressFamily IPv4 -Confirm:$false"
-        subprocess.call(["powershell.exe", ps_command])
-        ps_command_remove = "Remove-NetRoute -InterfaceAlias 'Ethernet' -AddressFamily IPv4 -Confirm:$false"
-        subprocess.call(["powershell.exe", ps_command_remove])
-        print("IPv4 addresses removed from network config.")
-        
-        ps_command = "New-NetIPAddress -InterfaceAlias 'Ethernet' -AddressFamily IPv4 -IPAddress {} -PrefixLength 24".format(','.join(ipv4_addresses))
-        subprocess.call(["powershell.exe", ps_command])
+    if ipv4_addresses:
+        if ipv4_addresses != get_set_ipv4_and_gateway_from_network_config()[0]:
+            ps_command = "Remove-NetIPAddress -InterfaceAlias 'Ethernet' -AddressFamily IPv4 -Confirm:$false"
+            subprocess.call(["powershell.exe", ps_command])
+            ps_command_remove = "Remove-NetRoute -InterfaceAlias 'Ethernet' -AddressFamily IPv4 -Confirm:$false"
+            subprocess.call(["powershell.exe", ps_command_remove])
+            print("IPv4 addresses removed from network config.")
+            
+            ps_command = "New-NetIPAddress -InterfaceAlias 'Ethernet' -AddressFamily IPv4 -IPAddress {} -PrefixLength 24".format(','.join(ipv4_addresses))
+            subprocess.call(["powershell.exe", ps_command])
 
-        ps_command_gateway = "New-NetRoute -InterfaceAlias 'Ethernet' -AddressFamily IPv4 -DestinationPrefix 0.0.0.0/0 -NextHop {}".format(gateway)
-        subprocess.call(["powershell.exe", ps_command_gateway])
+            ps_command_gateway = "New-NetRoute -InterfaceAlias 'Ethernet' -AddressFamily IPv4 -DestinationPrefix 0.0.0.0/0 -NextHop {}".format(gateway)
+            subprocess.call(["powershell.exe", ps_command_gateway])
 
-        print("IPv4 addresses and gateway set successfully.")
+            print("IPv4 addresses and gateway set successfully.")
+        else:
+            print("IPv4 addresses and gateway already set in network config.")
     else:
-        print("IPv4 addresses and gateway already set in network config.")
+        print("No IPv4 detected")
 
 def set_dns():
+    ps_command = "Get-DnsClientServerAddress -InterfaceAlias 'Ethernet'"
+    output = subprocess.check_output(["powershell.exe", ps_command])
+    if b'1.1.1.1' in output and b'2606:4700:4700::1111' in output and b'1.0.0.1' in output and b'2606:4700:4700::1001' in output:
+        print("DNS already set")
+        return
     ps_command_ipv4 = "Set-DnsClientServerAddress -InterfaceAlias 'Ethernet' -ServerAddresses '1.1.1.1', '1.0.0.1' -PassThru"
     subprocess.call(["powershell.exe", ps_command_ipv4])
     print("IPv4 DNS set to: 1.1.1.1, 1.0.0.1")

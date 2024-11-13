@@ -93,6 +93,15 @@ Install-Module PSWindowsUpdate -Force -AllowClobber
 Import-Module PSWindowsUpdate
 ```
 
+
+### ⚠️ If you have an error like below when you try to sysprep your windows server 2025 template you can try to running this commands and try again:
+[image](https://www.urtech.ca/wp-content/uploads/2018/07/syspre-setupact-log-error.jpg)
+```ps1
+Import-Module Appx
+Import-Module Dism
+Get-AppxPackage | Remove-AppxPackage
+```
+
 ### Configure Cloudbase-Init
 Deploy [these two conf files](https://github.com/codding-nepale/proxmox-win-cloudinit/tree/main/conf) to `C:\Program Files\Cloudbase Solutions\Cloudbase-Init\conf`.
 

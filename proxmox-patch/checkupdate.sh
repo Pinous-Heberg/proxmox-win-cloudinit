@@ -147,3 +147,4 @@ function restore_original_files() {
     echo "Original files restored successfully !" >> $log_file
     restartproxy
 }
+main()

@@ -15,6 +15,7 @@ use PVE::Storage;
 use PVE::QemuServer;
 use PVE::QemuServer::Drive qw(checked_volume_format);
 use PVE::QemuServer::Helpers;
+use PVE::QemuServer::PasswordUtils;
 
 use constant CLOUDINIT_DISK_SIZE => 4 * 1024 * 1024; # 4MiB in bytes
 
@@ -241,7 +242,7 @@ sub generate_configdrive2 {
 
 	if (!defined($meta_data)) {
 	    my $instance_id = cloudbase_gen_instance_id($user_data, $network_data);
-	    $meta_data = cloudbase_configdrive2_metadata($instance_id, $conf);
+	    $meta_data = cloudbase_configdrive2_metadata($instance_id, $conf, $vmid);
 	}
     } else {
 	$user_data = cloudinit_userdata($conf, $vmid) if !defined($user_data);
@@ -315,14 +316,21 @@ sub cloudbase_network_eni {
 }
 
 sub cloudbase_configdrive2_metadata {
-    my ($uuid, $conf) = @_;
+    my ($uuid, $conf, $vmid) = @_;
     my $meta_data = {
 	uuid => $uuid,
 	'network_config' => {
 	    'content_path' => '/content/0000',
 	},
     };
-    $meta_data->{'admin_pass'} = $conf->{cipassword} if $conf->{cipassword};
+    # For Windows VMs, decrypt the password before sending to cloud-init
+    if ($conf->{cipassword}) {
+	if ($conf->{cipassword} =~ /^\$5\$/ || $conf->{cipassword} =~ /^\$5\$/) {
+	    $meta_data->{'admin_pass'} = PVE::QemuServer::PasswordUtils::decrypt_pw_reversible($conf->{cipassword}, $vmid);
+	} else {
+	    $meta_data->{'admin_pass'} = $conf->{cipassword};
+	}
+    }
     if (defined(my $keys = $conf->{sshkeys})) {
 	$keys = URI::Escape::uri_unescape($keys);
 	$keys = [map { my $key = $_; chomp $key; $key } split(/\n/, $keys)];

@@ -29,6 +29,7 @@ use PVE::QemuConfig;
 use PVE::QemuServer;
 use PVE::QemuServer::Cloudinit;
 use PVE::QemuServer::CPUConfig;
+use PVE::QemuServer::PasswordUtils;
 use PVE::QemuServer::Drive qw(checked_volume_format checked_parse_volname);
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::ImportDisk;
@@ -2243,12 +2244,16 @@ my $update_vm_api  = sub {
 		    }
 		    $conf->{pending}->{$opt} = $param->{$opt};
 		} elsif ($opt eq 'cipassword') {
-		    if (!PVE::QemuServer::Helpers::windows_version($conf->{ostype})) {
+		    if ($conf->{ostype} && $conf->{ostype} =~ /^win/) {
+			# For Windows VMs, use reversible encryption with VM-specific key
+			$param->{cipassword} = PVE::QemuServer::PasswordUtils::encrypt_pw_reversible($param->{cipassword}, $vmid)
+			    if $param->{cipassword} !~ /^\$5\$/;
+		    } else {
 			# Same logic as in cloud-init (but with the regex fixed...)
 			$param->{cipassword} = PVE::Tools::encrypt_pw($param->{cipassword})
 			    if $param->{cipassword} !~ /^\$(?:[156]|2[ay])(\$.+){2}/;
 		    }
-		    $conf->{cipassword} = $param->{cipassword};
+		    $conf->{pending}->{$opt} = $param->{cipassword};
 		} else {
 		    $conf->{pending}->{$opt} = $param->{$opt};
 

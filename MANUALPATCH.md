@@ -1,54 +1,172 @@
 ## Manual Patching Instructions
 
-### Qemu.pm
-- **File Location:** `/usr/share/perl5/PVE/API2/Qemu.pm`
+# Manual Patch Instructions for Proxmox Windows Cloud-Init Support
 
-1. After the line:
-   ```perl5
-   my $background_delay = extract_param($param, 'background_delay');
-   ```
-   Add the following code:
-   ```perl5
-   my $conf = PVE::QemuConfig->load_config($vmid);
-   my $ostype = $conf->{ostype};
+This document provides step-by-step instructions for manually applying the patches to enable Windows cloud-init support with secure password handling in Proxmox VE.
+
+## Overview
+
+The patches implement:
+1. **Encrypted password storage** for Windows VMs in configuration files
+2. **Password decryption** for cloud-init metadata delivery to Windows VMs
+3. **Secure reversible encryption** using AES encryption for Windows VM passwords
+
+## Prerequisites
+
+Ensure you have the required Perl modules installed:
+```bash
+apt-get update
+apt-get install libcrypt-cbc-perl libcrypt-cipher-aes-perl libmime-base64-perl
+```
+
+## Installation Steps
+
+### 1. Install PasswordUtils Module
+
+Create the new password utilities module:
+
+**File Location:** `/usr/share/perl5/PVE/QemuServer/PasswordUtils.pm`
+
+Copy the entire content from `proxmox-patch/sourcefiles/PasswordUtils.pm` to the target location:
+
+```bash
+cp proxmox-patch/sourcefiles/PasswordUtils.pm /usr/share/perl5/PVE/QemuServer/PasswordUtils.pm
+chown root:root /usr/share/perl5/PVE/QemuServer/PasswordUtils.pm
+chmod 644 /usr/share/perl5/PVE/QemuServer/PasswordUtils.pm
+```
+
+### 2. Patch Qemu.pm
+
+**File Location:** `/usr/share/perl5/PVE/API2/Qemu.pm`
+
+#### 2.1 Add PasswordUtils Import
+
+After the line:
+```perl
+use PVE::QemuServer::CPUConfig;
+```
+
+Add:
+```perl
+use PVE::QemuServer::PasswordUtils;
+```
+
+#### 2.2 Update Password Handling Logic
+
+Find the section around line 2245 that contains:
+```perl
+} elsif ($opt eq 'cipassword') {
+    # Same logic as in cloud-init (but with the regex fixed...)
+    $param->{cipassword} = PVE::Tools::encrypt_pw($param->{cipassword})
+        if $param->{cipassword} !~ /^\$(?:[156]|2[ay])(\$.+){2}/;
+    $conf->{cipassword} = $param->{cipassword};
+```
+
+Replace it with:
+```perl
+} elsif ($opt eq 'cipassword') {
+    if (PVE::QemuServer::Helpers::windows_version($conf->{ostype})) {
+        # For Windows VMs, use reversible encryption
+        $param->{cipassword} = PVE::QemuServer::PasswordUtils::encrypt_pw_reversible($param->{cipassword})
+            if $param->{cipassword} !~ /^\$5\$/;
+    } else {
+        # Same logic as in cloud-init (but with the regex fixed...)
+        $param->{cipassword} = PVE::Tools::encrypt_pw($param->{cipassword})
+            if $param->{cipassword} !~ /^\$(?:[156]|2[ay])(\$.+){2}/;
+    }
+    $conf->{cipassword} = $param->{cipassword};
+```
+
+### 3. Patch Cloudinit.pm
+
+**File Location:** `/usr/share/perl5/PVE/QemuServer/Cloudinit.pm`
+
+#### 3.1 Add PasswordUtils Import
+
+After the line:
+```perl
+use PVE::QemuServer::Helpers;
+```
+
+Add:
+```perl
+use PVE::QemuServer::PasswordUtils;
+```
+
+#### 3.2 Update Windows Metadata Generation
+
+Find the section around line 324 in the `cloudbase_configdrive2_metadata` function:
+```perl
+$meta_data->{'admin_pass'} = $conf->{cipassword} if $conf->{cipassword};
+```
+
+Replace it with:
+```perl
+# For Windows VMs, decrypt the password before sending to cloud-init
+if ($conf->{cipassword}) {
+    if ($conf->{cipassword} =~ /^\$5\$/) {
+        $meta_data->{'admin_pass'} = PVE::QemuServer::PasswordUtils::decrypt_pw_reversible($conf->{cipassword});
+    } else {
+        $meta_data->{'admin_pass'} = $conf->{cipassword};
+    }
+}
+```
+
+## Automatic Patch Application
+
+Alternatively, you can apply the patches automatically using the provided patch files:
+
+```bash
+# Apply Qemu.pm patch
+cd /usr/share/perl5/PVE/API2/
+cp Qemu.pm Qemu.pm.backup
+patch -p1 < /path/to/proxmox-patch/Qemu.pm.patch
+
+# Install PasswordUtils module
+patch -p1 < /path/to/proxmox-patch/PasswordUtils.pm.patch
+
+# Apply Cloudinit.pm patch  
+cd /usr/share/perl5/PVE/QemuServer/
+cp Cloudinit.pm Cloudinit.pm.backup
+patch -p1 < /path/to/proxmox-patch/Cloudinit.pm.patch
+```
+
+## Verification
+
+After applying the patches:
+
+1. **Restart Proxmox services:**
+   ```bash
+   systemctl restart pveproxy
+   systemctl restart pvedaemon
    ```
 
-2. Delete the following code block:
-   ```perl5
-   if (defined(my $cipassword = $param->{cipassword})) {
-       # Same logic as in cloud-init (but with the regex corrected...)
-   ```
-   Replace it with:
-   ```perl5
-   if (!(PVE::QemuServer::windows_version($ostype))) {
-       $param->{cipassword} = PVE::Tools::encrypt_pw($cipassword)
-           if $cipassword !~ /^\$(? :[156]|2[ay])(\$.+){2}/;
-   }
+2. **Test with a Windows VM:**
+   - Create or edit a Windows VM
+   - Set a cloud-init password
+   - Verify the password is stored with `/^\$5\$/` prefix in `/etc/pve/qemu-server/<vmid>.conf`
+   - Start the VM and verify the password is correctly applied
+
+3. **Check for syntax errors:**
+   ```bash
+   perl -c /usr/share/perl5/PVE/API2/Qemu.pm
+   perl -c /usr/share/perl5/PVE/QemuServer/Cloudinit.pm  
+   perl -c /usr/share/perl5/PVE/QemuServer/PasswordUtils.pm
    ```
 
-### Cloudinit.pm
-- **File Location:** `/usr/share/perl5/PVE/QemuServer/Cloudinit.pm`
+## Security Notes
 
-1. After the line:
-   ```perl5
-   my ($searchdomains, $nameservers) = get_dns_conf($conf);
-   ```
-   Add:
-   ```perl5
-   my $ostype = $conf->{"ostype"};
-   my $default_dns = '';
-   my $default_search = '';
-   my $dnsinserted = 0; # insert dns just once for the machine
-   ```
+- Passwords for Windows VMs are now encrypted in configuration files using AES encryption
+- The encryption key is derived from system-specific data
+- For production use, consider implementing a more secure key management system
+- Non-Windows VMs continue to use the existing bcrypt-based password hashing
 
-2. Add the default DNS after:
-   ```perl5
-   if ($nameservers && @$nameservers) {
-       $nameservers = join(' ', @$nameservers);
-       $content .= " dns_nameservers $nameservers\n";
-   ```
-   Add:
-   ```perl5
+## Troubleshooting
+
+- If you encounter module loading errors, ensure all required Perl dependencies are installed
+- Check Proxmox logs: `/var/log/pveproxy/access.log` and `/var/log/daemon.log`
+- Verify file permissions are correct (644 for .pm files, root:root ownership)
+- Test password encryption/decryption manually using the PasswordUtils module functions
    $default_dns = $nameservers; # Windows support
    ```
 

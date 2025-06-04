@@ -97,7 +97,7 @@ sub decrypt_pw_reversible {
         return $result;
     }
     
-    return $encrypted_password if $encrypted_password !~ /^\$5\$/; # Not encrypted in legacy format
+    return $encrypted_password if $encrypted_password !~ /^\$5\$/;
 
     my $encoded_data = $encrypted_password;
     $encoded_data =~ s/^\$5\$//;

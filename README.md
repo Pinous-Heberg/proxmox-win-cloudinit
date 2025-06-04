@@ -1,54 +1,95 @@
 # proxmox-win-cloudinit
-## ⚠️This project does not belong to us. The github repository is just a fork of [Gecko-IT](https://git.geco-it.net/GECO-IT-PUBLIC/Geco-Cloudbase-Init) which is at the origin of this project but which does not maintain it any more up to date, this is why we decided to maintain it up to date on the current version proxmox.
-This is an implementation of Cloudbase-Init to Windows virtual machines running in a Proxmox Node in order to use cloud-init with those vms.
+# Proxmox Windows Cloud-Init with Secure Password Management
 
-What can you do with this implementation?
+## ⚠️ Project Notice
+This project does not belong to us. The GitHub repository is a fork of [Gecko-IT](https://git.geco-it.net/GECO-IT-PUBLIC/Geco-Cloudbase-Init) which originated this project but is no longer maintained. We decided to maintain it and keep it up to date for current Proxmox versions.
+
+## Overview
+
+This is an enhanced implementation of Cloudbase-Init for Windows virtual machines running on Proxmox VE, featuring **secure password management** where passwords are encrypted in configuration files but decrypted for cloud-init delivery.
+
+## Key Features
+
+### 🔐 **Secure Password Handling (NEW)**
+- **Encrypted storage**: Windows VM passwords are encrypted with AES encryption in `/etc/pve/qemu-server/<vmid>.conf`
+- **Automatic decryption**: Passwords are decrypted when sent to cloud-init metadata for Windows VMs
+- **Enhanced security**: Unlike the previous implementation, passwords are no longer stored in plain text
+
+### 🚀 **Cloud-Init Capabilities**
 Use Cloudbase-Init with Windows VMs to:
-* Create a new user with username or enable administrator.
-* Set a password on the new user or administrator.
-* Set static ip or dhcp on network adapters.
-* Set DNS on network adapters.
+* Create a new user with username or enable administrator
+* Set a password on the new user or administrator (**now with encryption**)
+* Set static IP or DHCP on network adapters
+* Set DNS on network adapters
 * Automatic VM update on boot
-* Active RDP
-* Set machine hostname.
-* Insert public ssh keys to "user/.ssh/authorized_keys" file of created/enabled user.
-* Expand partition volumes automatically when there's a resized disk.
+* Enable RDP
+* Set machine hostname
+* Insert public SSH keys to "user/.ssh/authorized_keys" file
+* Expand partition volumes automatically when disk is resized
 
-You can do all below on system startup with the data provided by the cloud-init section of the proxmox gui.
+## Implementation Details
 
+### Modified Files
+- **Qemu.pm**: Enhanced to encrypt Windows VM passwords using reversible AES encryption
+- **Cloudinit.pm**: Enhanced to decrypt passwords before sending to cloud-init metadata
+- **PasswordUtils.pm**: New module providing secure reversible encryption/decryption functions
 
-There is two files that we need to modify Qemu.pm and Cloudinit.pm.
-* Qemu.pm to get password as cleartext in meta_data drive when it is a Windows VM.
-* Cloudinit.pm to generate a metadata json file with variables that are compatible with Cloudbase-Init.
+### Password Storage Format
+- **Windows VMs**: `encrypted-data>` (encrypted with AES)
+- **Linux VMs**: Traditional bcrypt hash format (unchanged)
 
-## Install Proxmox patch
+## Installation
 
-### ⚠️ The patch has been tested and approved for proxmox version 8.2.2 please make a backup of both Cloudinit.pm stored in ```/usr/share/perl5/PVE/QemuServer/Cloudinit.pm``` and Qemu.pm stored in ```/usr/share/perl5/PVE/API2/Qemu.pm``` if you are trying to apply the patch in a version prior to proxmox 8.2.2 or higher.
+### Prerequisites
+⚠️ **Compatibility**: Tested and approved for Proxmox VE 8.2.2. Please backup both files before applying patches on other versions:
+- `/usr/share/perl5/PVE/QemuServer/Cloudinit.pm`
+- `/usr/share/perl5/PVE/API2/Qemu.pm`
 
-## Launch below as a test to see if you can apply the patch file, change path to where you downloaded the files and run this for two .patch files.
-```sh
-patch --force --forward --backup -p0 --directory / --input "/absolute/path/to/patchfile.pm.patch" --dry-run && echo "You can apply patch" || { echo "Can't apply patch!";}
+Install required Perl modules:
+```bash
+apt-get update
+apt-get install libcrypt-cbc-perl libcrypt-cipher-aes-perl libmime-base64-perl
 ```
 
-## If the result is "Can't apply patch!", you can type "apt reinstall qemu-server" to reinstall the qemu-server files(If you have made changes to qemu-server source files they will be lost!)
+### Automatic Patch Application
 
-## Apply the patch if the result is "You can apply patch"
-```sh
-patch --force --forward --backup -p0 --directory / --input "/absolute/path/to/patchfile.pm.patch"
+1. **Test patch compatibility:**
+```bash
+patch --force --forward --backup -p0 --directory / --input "/absolute/path/to/Qemu.pm.patch" --dry-run && echo "Qemu.pm patch can be applied" || echo "Can't apply Qemu.pm patch!"
+patch --force --forward --backup -p0 --directory / --input "/absolute/path/to/Cloudinit.pm.patch" --dry-run && echo "Cloudinit.pm patch can be applied" || echo "Can't apply Cloudinit.pm patch!"
 ```
-If you want to revert the patch:
-```sh
+
+2. **If patches can't be applied, reinstall qemu-server:**
+```bash
+apt reinstall qemu-server
+```
+
+3. **Apply patches:**
+```bash
+# Install PasswordUtils module
+patch --force --forward --backup -p0 --directory / --input "/absolute/path/to/PasswordUtils.pm.patch"
+
+# Apply Qemu.pm patch
+patch --force --forward --backup -p0 --directory / --input "/absolute/path/to/Qemu.pm.patch"
+
+# Apply Cloudinit.pm patch
+patch --force --forward --backup -p0 --directory / --input "/absolute/path/to/Cloudinit.pm.patch"
+```
+
+4. **Restart Proxmox services:**
+```bash
+systemctl restart pvedaemon
+systemctl restart pveproxy
+```
+
+### Manual Installation
+
+For manual installation instructions, see: [Manual Patching Guide](MANUALPATCH.md)
+
+### Patch Reversal
+```bash
 patch --force --reverse --backup -p0 --directory / --input "/absolute/path/to/patchfile.pm.patch"
 ```
-
-If you want to apply the patch manually you can follow these steps: [Manual Patching](https://github.com/codding-nepale/proxmox-win-cloudinit/blob/main/MANUALPATCH.md)
-
-After installing the patch, run the following command to restart the pve daemon to apply the patches:
-```sh
-service pvedaemon restart
-```
-
-You can run auto update cron job if qemu-server version change with the following commands:
 ```sh
 wget https://raw.githubusercontent.com/Pinous-Heberg/proxmox-win-cloudinit/main/proxmox-patch/checkupdate.sh -O /opt/checkupdate.sh
 chmod +x /opt/checkupdate.sh

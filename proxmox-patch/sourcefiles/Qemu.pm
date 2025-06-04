@@ -24,18 +24,23 @@ use PVE::JSONSchema qw(get_standard_option);
 use PVE::RESTHandler;
 use PVE::ReplicationConfig;
 use PVE::GuestHelpers qw(assert_tag_permissions);
+use PVE::GuestImport;
 use PVE::QemuConfig;
 use PVE::QemuServer;
 use PVE::QemuServer::Cloudinit;
 use PVE::QemuServer::CPUConfig;
-use PVE::QemuServer::Drive;
+use PVE::QemuServer::Drive qw(checked_volume_format checked_parse_volname);
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::ImportDisk;
 use PVE::QemuServer::Monitor qw(mon_cmd);
 use PVE::QemuServer::Machine;
 use PVE::QemuServer::Memory qw(get_current_memory);
+use PVE::QemuServer::MetaInfo;
 use PVE::QemuServer::PCI;
+use PVE::QemuServer::QMPHelpers;
+use PVE::QemuServer::RNG;
 use PVE::QemuServer::USB;
+use PVE::QemuServer::Virtiofs qw(max_virtiofs);
 use PVE::QemuMigrate;
 use PVE::RPCEnvironment;
 use PVE::AccessControl;
@@ -123,6 +128,19 @@ my $check_drive_param = sub {
 
 	PVE::QemuServer::cleanup_drive_path($opt, $storecfg, $drive);
 
+	my $volid = $drive->{file};
+	my ($storeid, $volname) = PVE::Storage::parse_volume_id($volid, 1);
+	if (
+	    $storeid
+	    && $volid !~ $PVE::QemuServer::Drive::NEW_DISK_RE
+	    && defined($volname)
+	    && $volname ne 'cloudinit'
+	) {
+	    my $vtype = (PVE::Storage::parse_volname($storecfg, $volid))[0];
+	    raise_param_exc({ $opt => "explicit 'media=cdrom' is required for iso images"})
+		if $vtype eq 'iso' && !(defined($drive->{media}) && $drive->{media} eq 'cdrom');
+	}
+
 	$extra_checks->($drive) if $extra_checks;
 
 	$param->{$opt} = PVE::QemuServer::print_drive($drive, 1);
@@ -130,7 +148,7 @@ my $check_drive_param = sub {
 };
 
 my $check_storage_access = sub {
-   my ($rpcenv, $authuser, $storecfg, $vmid, $settings, $default_storage) = @_;
+   my ($rpcenv, $authuser, $storecfg, $vmid, $settings, $default_storage, $extraction_storage) = @_;
 
    $foreach_volume_with_alloc->($settings, sub {
 	my ($ds, $drive) = @_;
@@ -145,7 +163,7 @@ my $check_storage_access = sub {
 	} elsif ($isCDROM && ($volid eq 'cdrom')) {
 	    $rpcenv->check($authuser, "/", ['Sys.Console']);
 	} elsif (!$isCDROM && ($volid =~ $PVE::QemuServer::Drive::NEW_DISK_RE)) {
-	    my ($storeid, $size) = ($2 || $default_storage, $3);
+	    my $storeid = $2 || $default_storage;
 	    die "no storage ID specified (and no default storage)\n" if !$storeid;
 	    $rpcenv->check($authuser, "/storage/$storeid", ['Datastore.AllocateSpace']);
 	    my $scfg = PVE::Storage::storage_config($storecfg, $storeid);
@@ -162,10 +180,30 @@ my $check_storage_access = sub {
 
 	if (my $src_image = $drive->{'import-from'}) {
 	    my $src_vmid;
-	    if (PVE::Storage::parse_volume_id($src_image, 1)) { # PVE-managed volume
-		(my $vtype, undef, $src_vmid) = PVE::Storage::parse_volname($storecfg, $src_image);
-		raise_param_exc({ $ds => "$src_image has wrong type '$vtype' - not an image" })
-		    if $vtype ne 'images';
+	    my ($storeid) = PVE::Storage::parse_volume_id($src_image, 1);
+	    if ($storeid) { # PVE-managed volume
+		my $scfg = PVE::Storage::storage_config($storecfg, $storeid);
+		(my $vtype, undef, $src_vmid, undef, undef, undef, my $fmt)
+		    = checked_parse_volname($storecfg, $src_image);
+
+		raise_param_exc({ $ds => "$src_image has wrong type '$vtype' - needs to be 'images' or 'import'" })
+		    if $vtype ne 'images' && $vtype ne 'import';
+
+		if (PVE::QemuServer::Helpers::needs_extraction($vtype, $fmt)) {
+		    my $extraction_scfg = defined($extraction_storage)
+			? PVE::Storage::storage_config($storecfg, $extraction_storage)
+			: $scfg;
+		    my $extraction_param = defined($extraction_storage) ? 'import-working-storage' : $ds;
+		    my $extraction_id = $extraction_storage // $storeid;
+
+		    if (!$extraction_scfg->{content}->{images} || !$extraction_scfg->{path}) {
+			raise_param_exc({
+			    $extraction_param => "import working storage '$extraction_id' does not support"
+				." 'images' content type or is not file based.",
+			});
+		    }
+		    $rpcenv->check($authuser, "/storage/$extraction_id", ['Datastore.AllocateSpace']);
+		}
 	    }
 
 	    if ($src_vmid) { # might be actively used by VM and will be copied via clone_disk()
@@ -337,7 +375,7 @@ my sub prohibit_tpm_version_change {
 
 # Note: $pool is only needed when creating a VM, because pool permissions
 # are automatically inherited if VM already exists inside a pool.
-my sub create_disks : prototype($$$$$$$$$$) {
+my sub create_disks : prototype($$$$$$$$$$$) {
     my (
 	$rpcenv,
 	$authuser,
@@ -349,6 +387,7 @@ my sub create_disks : prototype($$$$$$$$$$) {
 	$settings,
 	$default_storage,
 	$is_live_import,
+	$extraction_storage,
     ) = @_;
 
     my $vollist = [];
@@ -412,18 +451,47 @@ my sub create_disks : prototype($$$$$$$$$$) {
 
 		$needs_creation = $live_import;
 
-		if (PVE::Storage::parse_volume_id($source, 1)) { # PVE-managed volume
+		my ($source_storage, $source_volid) = PVE::Storage::parse_volume_id($source, 1);
+
+		if ($source_storage) { # PVE-managed volume
+		    my ($vtype, $source_format) = (checked_parse_volname($storecfg, $source))[0,6];
+		    my $needs_extraction =
+			PVE::QemuServer::Helpers::needs_extraction($vtype, $source_format);
+		    my $untrusted = $vtype eq 'import' ? 1 : 0;
+		    if ($needs_extraction) {
+			print "extracting $source\n";
+			my $extracted_volid = PVE::GuestImport::extract_disk_from_import_file(
+			    $source, $vmid, $extraction_storage);
+			print "finished extracting to $extracted_volid\n";
+			push @$vollist, $extracted_volid;
+			$source = $extracted_volid;
+			$source_format = checked_volume_format($storecfg, $source);
+
+			my (undef, undef, undef, $parent)
+			    = PVE::Storage::volume_size_info($storecfg, $source);
+			die "importing from extracted images with backing file ($parent) not allowed\n"
+			    if $parent;
+		    }
+
 		    if ($live_import && $ds ne 'efidisk0') {
 			my $path = PVE::Storage::path($storecfg, $source)
 			    or die "failed to get a path for '$source'\n";
-			$source = $path;
-			($size, my $source_format) = PVE::Storage::file_size_info($source);
-			die "could not get file size of $source\n" if !$size;
+			# check potentially untrusted image file for import vtype
+			$size = PVE::Storage::file_size_info($path, undef, $source_format, $untrusted);
+			die "could not get file size of $path\n" if !$size;
 			$live_import_mapping->{$ds} = {
-			    path => $source,
+			    path => $path,
 			    format => $source_format,
 			};
+			$live_import_mapping->{$ds}->{'delete-after-finish'} = $source
+			    if $needs_extraction;
 		    } else {
+			# check potentially untrusted image file for import vtype
+			if ($untrusted) {
+			    my $path = PVE::Storage::path($storecfg, $source);
+			    PVE::Storage::file_size_info($path, undef, $source_format, 1);
+			}
+
 			my $dest_info = {
 			    vmid => $vmid,
 			    drivename => $ds,
@@ -434,14 +502,24 @@ my sub create_disks : prototype($$$$$$$$$$) {
 			$dest_info->{efisize} = PVE::QemuServer::get_efivars_size($conf, $disk)
 			    if $ds eq 'efidisk0';
 
-			($dst_volid, $size) = eval {
-			    $import_from_volid->($storecfg, $source, $dest_info, $vollist);
+			eval {
+			    ($dst_volid, $size)
+				= $import_from_volid->($storecfg, $source, $dest_info, $vollist);
+
+			    # remove extracted volumes after importing
+			    if ($needs_extraction) {
+				PVE::Storage::vdisk_free($storecfg, $source);
+				print "cleaned up extracted image $source\n";
+			    }
+			    @$vollist = grep { $_ ne $source } @$vollist;
 			};
 			die "cannot import from '$source' - $@" if $@;
 		    }
 		} else {
 		    $source = PVE::Storage::abs_filesystem_path($storecfg, $source, 1);
-		    ($size, my $source_format) = PVE::Storage::file_size_info($source);
+		    # check potentially untrusted image file!
+		    ($size, my $source_format) =
+			PVE::Storage::file_size_info($source, undef, 'auto-detect', 1);
 		    die "could not get file size of $source\n" if !$size;
 
 		    if ($live_import && $ds ne 'efidisk0') {
@@ -452,6 +530,7 @@ my sub create_disks : prototype($$$$$$$$$$) {
 		    } else {
 			(undef, $dst_volid) = PVE::QemuServer::ImportDisk::do_import(
 			    $source,
+			    $size,
 			    $vmid,
 			    $storeid,
 			    {
@@ -460,6 +539,11 @@ my sub create_disks : prototype($$$$$$$$$$) {
 				'skip-config-update' => 1,
 			    },
 			);
+
+			# change imported disk to a base volume in case the VM is a template
+			$dst_volid = PVE::Storage::vdisk_create_base($storecfg, $dst_volid)
+			    if PVE::QemuConfig->is_template($conf);
+
 			push @$vollist, $dst_volid;
 		    }
 		}
@@ -481,8 +565,13 @@ my sub create_disks : prototype($$$$$$$$$$) {
 		my $volid;
 		if ($ds eq 'efidisk0') {
 		    my $smm = PVE::QemuServer::Machine::machine_type_is_q35($conf);
+
+		    my $amd_sev_type = PVE::QemuServer::CPUConfig::get_amd_sev_type($conf);
+		    die "SEV-SNP uses consolidated read-only firmware and does not require an EFI disk\n"
+			if $amd_sev_type && $amd_sev_type eq 'snp';
+
 		    ($volid, $size) = PVE::QemuServer::create_efidisk(
-			$storecfg, $storeid, $vmid, $fmt, $arch, $disk, $smm);
+			$storecfg, $storeid, $vmid, $fmt, $arch, $disk, $smm, $amd_sev_type);
 		} elsif ($ds eq 'tpmstate0') {
 		    # swtpm can only use raw volumes, and uses a fixed size
 		    $size = PVE::Tools::convert_size(PVE::QemuServer::Drive::TPMSTATE_DISK_SIZE, 'b' => 'kb');
@@ -490,6 +579,11 @@ my sub create_disks : prototype($$$$$$$$$$) {
 		} else {
 		    $volid = PVE::Storage::vdisk_alloc($storecfg, $storeid, $vmid, $fmt, undef, $size);
 		}
+
+		# change created disk to a base volume in case the VM is a template
+		$volid = PVE::Storage::vdisk_create_base($storecfg, $volid)
+		    if PVE::QemuConfig->is_template($conf);
+
 		push @$vollist, $volid;
 		$disk->{file} = $volid;
 		$disk->{size} = PVE::Tools::convert_size($size, 'kb' => 'b');
@@ -501,9 +595,16 @@ my sub create_disks : prototype($$$$$$$$$$) {
 	} else {
 	    PVE::Storage::check_volume_access($rpcenv, $authuser, $storecfg, $vmid, $volid);
 	    if ($storeid) {
-		my ($vtype) = PVE::Storage::parse_volname($storecfg, $volid);
+		my ($vtype, $volume_format) = (checked_parse_volname($storecfg, $volid))[0,6];
+
 		die "cannot use volume $volid - content type needs to be 'images' or 'iso'"
 		    if $vtype ne 'images' && $vtype ne 'iso';
+
+		# TODO PVE 9 - consider disallowing setting an explicit format for managed volumes.
+		if ($disk->{format} && $disk->{format} ne $volume_format) {
+		    die "drive '$ds' - volume '$volid' - 'format=$disk->{format}' option different"
+			." from storage format '$volume_format'\n";
+		}
 
 		if (PVE::QemuServer::Drive::drive_is_cloudinit($disk)) {
 		    if (
@@ -513,6 +614,8 @@ my sub create_disks : prototype($$$$$$$$$$) {
 		    ) {
 			die "$ds - cloud-init drive is already attached at '$ci_key'\n";
 		    }
+		} elsif ($ds eq 'tpmstate0' && $volume_format ne 'raw') {
+		    die "tpmstate0: volume format is '$volume_format', only 'raw' is supported!\n";
 		}
 	    }
 
@@ -592,6 +695,7 @@ my $hwtypeoptions = {
     'vga' => 1,
     'watchdog' => 1,
     'audio0' => 1,
+    'rng0' => 1,
 };
 
 my $generaloptions = {
@@ -661,8 +765,12 @@ my sub check_usb_perm {
     $rpcenv->check_vm_perm($authuser, $vmid, $pool, ['VM.Config.HWType']);
 
     my $device = PVE::JSONSchema::parse_property_string('pve-qm-usb', $value);
-    if ($device->{host} && $device->{host} !~ m/^spice$/i) {
-	die "only root can set '$opt' config for real devices\n";
+    if ($device->{host}) {
+	if ($device->{host} =~ m/^spice$/i) {
+	    # already checked generic permission above
+	} else {
+	    die "only root can set '$opt' config for real devices\n";
+	}
     } elsif ($device->{mapping}) {
 	$rpcenv->check_full($authuser, "/mapping/usb/$device->{mapping}", ['Mapping.Use']);
     } else {
@@ -716,6 +824,48 @@ my sub check_vm_create_hostpci_perm {
     return 1;
 };
 
+my sub check_rng_perm {
+    my ($rpcenv, $authuser, $vmid, $pool, $opt, $value) = @_;
+
+    return 1 if $authuser eq 'root@pam';
+
+    $rpcenv->check_vm_perm($authuser, $vmid, $pool, ['VM.Config.HWType']);
+
+    my $device = PVE::JSONSchema::parse_property_string('pve-qm-rng', $value);
+    if ($device->{source} && $device->{source} eq '/dev/hwrng') {
+	$rpcenv->check_full($authuser, "/mapping/hwrng", ['Mapping.Use']);
+    }
+
+    return 1;
+}
+
+my sub check_dir_perm {
+    my ($rpcenv, $authuser, $vmid, $pool, $opt, $value) = @_;
+
+    return 1 if $authuser eq 'root@pam';
+
+    $rpcenv->check_vm_perm($authuser, $vmid, $pool, ['VM.Config.Disk']);
+
+    my $virtiofs = PVE::JSONSchema::parse_property_string('pve-qm-virtiofs', $value);
+    $rpcenv->check_full($authuser, "/mapping/dir/$virtiofs->{dirid}", ['Mapping.Use']);
+
+    return 1;
+};
+
+my sub check_vm_create_dir_perm {
+    my ($rpcenv, $authuser, $vmid, $pool, $param) = @_;
+
+    return 1 if $authuser eq 'root@pam';
+
+    for (my $i = 0; $i < max_virtiofs(); $i++) {
+	my $opt = "virtiofs$i";
+	next if !$param->{$opt};
+	check_dir_perm($rpcenv, $authuser, $vmid, $pool, $opt, $param->{$opt});
+    }
+
+    return 1;
+};
+
 my $check_vm_modify_config_perm = sub {
     my ($rpcenv, $authuser, $vmid, $pool, $key_list) = @_;
 
@@ -723,10 +873,10 @@ my $check_vm_modify_config_perm = sub {
 
     foreach my $opt (@$key_list) {
 	# some checks (e.g., disk, serial port, usb) need to be done somewhere
-	# else, as there the permission can be value dependend
+	# else, as there the permission can be value dependent
 	next if PVE::QemuServer::is_valid_drivename($opt);
 	next if $opt eq 'cdrom';
-	next if $opt =~ m/^(?:unused|serial|usb|hostpci)\d+$/;
+	next if $opt =~ m/^(?:unused|serial|usb|hostpci|virtiofs)\d+$/;
 	next if $opt eq 'tags';
 
 
@@ -769,9 +919,9 @@ sub assert_scsi_feature_compatibility {
 
     my $drive = PVE::QemuServer::Drive::parse_drive($opt, $drive_attributes, 1);
 
-    my $machine_type = PVE::QemuServer::get_vm_machine($conf, undef, $conf->{arch});
+    my $machine_type = PVE::QemuServer::Machine::get_vm_machine($conf, undef, $conf->{arch});
     my $machine_version = PVE::QemuServer::Machine::extract_version(
-	$machine_type, PVE::QemuServer::kvm_user_version());
+	$machine_type, PVE::QemuServer::Helpers::kvm_user_version());
     my $drivetype = PVE::QemuServer::Drive::get_scsi_device_type(
 	$drive, $storecfg, $machine_version);
 
@@ -797,7 +947,7 @@ __PACKAGE__->register_method({
     method => 'GET',
     description => "Virtual machine index (per node).",
     permissions => {
-	description => "Only list VMs where you have VM.Audit permissons on /vms/<vmid>.",
+	description => "Only list VMs where you have VM.Audit permissions on /vms/<vmid>.",
 	user => 'all',
     },
     proxyto => 'node',
@@ -840,7 +990,7 @@ __PACKAGE__->register_method({
 	return $res;
     }});
 
-my $parse_restore_archive = sub {
+my $classify_restore_archive = sub {
     my ($storecfg, $archive) = @_;
 
     my ($archive_storeid, $archive_volname) = PVE::Storage::parse_volume_id($archive, 1);
@@ -852,6 +1002,22 @@ my $parse_restore_archive = sub {
 	$res->{volid} = $archive;
 	if ($scfg->{type} eq 'pbs') {
 	    $res->{type} = 'pbs';
+	    return $res;
+	}
+	if (PVE::Storage::storage_has_feature($storecfg, $archive_storeid, 'backup-provider')) {
+	    my $log_function = sub {
+		my ($log_level, $message) = @_;
+		my $prefix = $log_level eq 'err' ? 'ERROR' : uc($log_level);
+		print "$prefix: $message\n";
+	    };
+	    my $backup_provider = PVE::Storage::new_backup_provider(
+		$storecfg,
+		$archive_storeid,
+		$log_function,
+	    );
+
+	    $res->{type} = 'external';
+	    $res->{'backup-provider'} = $backup_provider;
 	    return $res;
 	}
     }
@@ -928,6 +1094,13 @@ __PACKAGE__->register_method({
 		    default => 0,
 		    description => "Start VM after it was created successfully.",
 		},
+		'import-working-storage' => get_standard_option('pve-storage-id', {
+		    description => "A file-based storage with 'images' content-type enabled, which"
+			." is used as an intermediary extraction storage during import. Defaults to"
+			." the source storage.",
+		    optional => 1,
+		    completion => \&PVE::QemuServer::complete_storage,
+		}),
 	    },
 	    1, # with_disk_alloc
 	),
@@ -954,6 +1127,7 @@ __PACKAGE__->register_method({
 	my $storage = extract_param($param, 'storage');
 	my $unique = extract_param($param, 'unique');
 	my $live_restore = extract_param($param, 'live-restore');
+	my $extraction_storage = extract_param($param, 'import-working-storage');
 
 	if (defined(my $ssh_keys = $param->{sshkeys})) {
 		$ssh_keys = URI::Escape::uri_unescape($ssh_keys);
@@ -1006,20 +1180,24 @@ __PACKAGE__->register_method({
 		    'backup',
 		);
 
-		$archive = $parse_restore_archive->($storecfg, $archive);
+		$archive = $classify_restore_archive->($storecfg, $archive);
 	    }
 	}
 
 	if (scalar(keys $param->%*) > 0) {
 	    &$resolve_cdrom_alias($param);
 
-	    &$check_storage_access($rpcenv, $authuser, $storecfg, $vmid, $param, $storage);
+	    &$check_storage_access(
+		$rpcenv, $authuser, $storecfg, $vmid, $param, $storage, $extraction_storage);
 
 	    &$check_vm_modify_config_perm($rpcenv, $authuser, $vmid, $pool, [ keys %$param]);
 
 	    &$check_vm_create_serial_perm($rpcenv, $authuser, $vmid, $pool, $param);
 	    check_vm_create_usb_perm($rpcenv, $authuser, $vmid, $pool, $param);
 	    check_vm_create_hostpci_perm($rpcenv, $authuser, $vmid, $pool, $param);
+	    check_rng_perm($rpcenv, $authuser, $vmid, $pool, 'rng0', $param->{rng0})
+		if $param->{rng0};
+	    check_vm_create_dir_perm($rpcenv, $authuser, $vmid, $pool, $param);
 
 	    PVE::QemuServer::check_bridge_access($rpcenv, $authuser, $param);
 	    &$check_cpu_model_access($rpcenv, $authuser, $param);
@@ -1064,7 +1242,15 @@ __PACKAGE__->register_method({
 			PVE::QemuServer::check_restore_permissions($rpcenv, $authuser, $merged);
 		    }
 		}
-		if ($archive->{type} eq 'file' || $archive->{type} eq 'pipe') {
+		if (my $backup_provider = $archive->{'backup-provider'}) {
+		    PVE::QemuServer::restore_external_archive(
+			$backup_provider,
+			$archive->{volid},
+			$vmid,
+			$authuser,
+			$restore_options,
+		    );
+		} elsif ($archive->{type} eq 'file' || $archive->{type} eq 'pipe') {
 		    die "live-restore is only compatible with backup images from a Proxmox Backup Server\n"
 			if $live_restore;
 		    PVE::QemuServer::restore_file_archive($archive->{path} // '-', $vmid, $authuser, $restore_options);
@@ -1106,14 +1292,14 @@ __PACKAGE__->register_method({
 
 	    my $realcmd = sub {
 		my $conf = $param;
-		my $arch = PVE::QemuServer::get_vm_arch($conf);
+		my $arch = PVE::QemuServer::Helpers::get_vm_arch($conf);
 
 		for my $opt (sort keys $param->%*) {
 		    next if $opt !~ m/^scsi\d+$/;
 		    assert_scsi_feature_compatibility($opt, $conf, $storecfg, $param->{$opt});
 		}
 
-		$conf->{meta} = PVE::QemuServer::new_meta_info_string();
+		$conf->{meta} = PVE::QemuServer::MetaInfo::new_meta_info_string();
 
 		my $vollist = [];
 		eval {
@@ -1128,6 +1314,7 @@ __PACKAGE__->register_method({
 			$param,
 			$storage,
 			$live_restore,
+			$extraction_storage
 		    );
 		    $conf->{$_} = $created_opts->{$_} for keys $created_opts->%*;
 
@@ -1148,16 +1335,10 @@ __PACKAGE__->register_method({
 			$conf->{vmgenid} = PVE::QemuServer::generate_uuid();
 		    }
 
-		    my $machine_conf = PVE::QemuServer::Machine::parse_machine($conf->{machine});
-		    my $machine = $machine_conf->{type};
-		    if (!$machine || $machine =~ m/^(?:pc|q35|virt)$/) {
-			# always pin Windows' machine version on create, they get to easily confused
-			if (PVE::QemuServer::Helpers::windows_version($conf->{ostype})) {
-			    $machine_conf->{type} = PVE::QemuServer::windows_get_pinned_machine_version($machine);
-			    $conf->{machine} = PVE::QemuServer::Machine::print_machine($machine_conf);
-			}
-		    }
-		    PVE::QemuServer::Machine::assert_valid_machine_property($conf, $machine_conf);
+		    # always pin Windows' machine version on create, they get confused too easily
+		    my $machine_string = PVE::QemuServer::Machine::check_and_pin_machine_string(
+			$conf->{machine}, $conf->{ostype});
+		    $conf->{machine} = $machine_string if $machine_string;
 
 		    $conf->{lock} = 'import' if $live_import_mapping;
 
@@ -1565,7 +1746,7 @@ __PACKAGE__->register_method({
 	my $vmid = $param->{vmid};
 	my $conf = PVE::QemuConfig->load_config($vmid);
 
-	my $ci = $conf->{cloudinit};
+	my $ci = $conf->{'special-sections'}->{cloudinit};
 
 	$conf->{cipassword} = '**********' if exists $conf->{cipassword};
 	$ci->{cipassword} = '**********' if exists $ci->{cipassword};
@@ -1667,18 +1848,10 @@ my $update_vm_api  = sub {
     my $digest = extract_param($param, 'digest');
 
     my $background_delay = extract_param($param, 'background_delay');
-	my $conf = PVE::QemuConfig->load_config($vmid);
-	my $ostype = $conf->{ostype};
 
     my $skip_cloud_init = extract_param($param, 'skip_cloud_init');
 
-    if (defined(my $cipassword = $param->{cipassword})) {
-	# Same logic as in cloud-init (but with the regex fixed...)
-	if (!(PVE::QemuServer::windows_version($ostype))) {
-	$param->{cipassword} = PVE::Tools::encrypt_pw($cipassword)
-	    if $cipassword !~ /^\$(?:[156]|2[ay])(\$.+){2}/;
-	}
-    }
+    my $extraction_storage = extract_param($param, 'import-working-storage');
 
     my @paramarr = (); # used for log message
     foreach my $key (sort keys %$param) {
@@ -1793,7 +1966,7 @@ my $update_vm_api  = sub {
 
     &$check_vm_modify_config_perm($rpcenv, $authuser, $vmid, undef, [keys %$param]);
 
-    &$check_storage_access($rpcenv, $authuser, $storecfg, $vmid, $param);
+    &$check_storage_access($rpcenv, $authuser, $storecfg, $vmid, $param, undef, $extraction_storage);
 
     PVE::QemuServer::check_bridge_access($rpcenv, $authuser, $param);
 
@@ -1801,7 +1974,7 @@ my $update_vm_api  = sub {
 
 	my $conf = PVE::QemuConfig->load_config($vmid);
 
-	die "checksum missmatch (file change by other user?)\n"
+	die "checksum mismatch (file change by other user?)\n"
 	    if $digest && $digest ne $conf->{digest};
 
 	&$check_cpu_model_access($rpcenv, $authuser, $param, $conf);
@@ -1924,6 +2097,14 @@ my $update_vm_api  = sub {
 		    check_hostpci_perm($rpcenv, $authuser, $vmid, undef, $opt, $val);
 		    PVE::QemuConfig->add_to_pending_delete($conf, $opt, $force);
 		    PVE::QemuConfig->write_config($vmid, $conf);
+		} elsif ($opt =~ m/^rng\d+$/) {
+		    check_rng_perm($rpcenv, $authuser, $vmid, undef, $opt, $val);
+		    PVE::QemuConfig->add_to_pending_delete($conf, $opt, $force);
+		    PVE::QemuConfig->write_config($vmid, $conf);
+		} elsif ($opt =~ m/^virtiofs\d$/) {
+		    check_dir_perm($rpcenv, $authuser, $vmid, undef, $opt, $val);
+		    PVE::QemuConfig->add_to_pending_delete($conf, $opt, $force);
+		    PVE::QemuConfig->write_config($vmid, $conf);
 		} elsif ($opt eq 'tags') {
 		    assert_tag_permissions($vmid, $val, '', $rpcenv, $authuser);
 		    delete $conf->{$opt};
@@ -1949,7 +2130,7 @@ my $update_vm_api  = sub {
 		$conf = PVE::QemuConfig->load_config($vmid); # update/reload
 		next if defined($conf->{pending}->{$opt}) && ($param->{$opt} eq $conf->{pending}->{$opt}); # skip if nothing changed
 
-		my $arch = PVE::QemuServer::get_vm_arch($conf);
+		my $arch = PVE::QemuServer::Helpers::get_vm_arch($conf);
 
 		if (PVE::QemuServer::is_valid_drivename($opt)) {
 		    # old drive
@@ -1977,6 +2158,7 @@ my $update_vm_api  = sub {
 			{$opt => $param->{$opt}},
 			undef,
 			undef,
+			$extraction_storage,
 		    );
 		    $conf->{pending}->{$_} = $created_opts->{$_} for keys $created_opts->%*;
 
@@ -2013,6 +2195,18 @@ my $update_vm_api  = sub {
 		    }
 		    check_hostpci_perm($rpcenv, $authuser, $vmid, undef, $opt, $param->{$opt});
 		    $conf->{pending}->{$opt} = $param->{$opt};
+		} elsif ($opt =~ m/^rng\d+$/) {
+		    if (my $oldvalue = $conf->{$opt}) {
+			check_rng_perm($rpcenv, $authuser, $vmid, undef, $opt, $oldvalue);
+		    }
+		    check_rng_perm($rpcenv, $authuser, $vmid, undef, $opt, $param->{$opt});
+		    $conf->{pending}->{$opt} = $param->{$opt};
+		} elsif ($opt =~ m/^virtiofs\d$/) {
+		    if (my $oldvalue = $conf->{$opt}) {
+			check_dir_perm($rpcenv, $authuser, $vmid, undef, $opt, $oldvalue);
+		    }
+		    check_dir_perm($rpcenv, $authuser, $vmid, undef, $opt, $param->{$opt});
+		    $conf->{pending}->{$opt} = $param->{$opt};
 		} elsif ($opt eq 'tags') {
 		    assert_tag_permissions($vmid, $conf->{$opt}, $param->{$opt}, $rpcenv, $authuser);
 		    $conf->{pending}->{$opt} = PVE::GuestHelpers::get_unique_tags($param->{$opt});
@@ -2027,8 +2221,34 @@ my $update_vm_api  = sub {
 		    $conf->{pending}->{$opt} = $param->{$opt};
 		} elsif ($opt eq 'machine') {
 		    my $machine_conf = PVE::QemuServer::Machine::parse_machine($param->{$opt});
-		    PVE::QemuServer::Machine::assert_valid_machine_property($conf, $machine_conf);
+		    PVE::QemuServer::Machine::assert_valid_machine_property($machine_conf);
 		    $conf->{pending}->{$opt} = $param->{$opt};
+		} elsif ($opt eq 'ostype') {
+		    # Check if machine version pinning is needed when switching OS type, just like
+		    # upon creation. Skip if 'machine' is explicitly set or removed at the same time
+		    # to honor the users request. While it should be enough to look at $modified,
+		    # because 'machine' is sorted before 'ostype', be explicit just to be sure.
+		    if (
+			!defined($param->{machine})
+			&& !defined($conf->{pending}->{machine})
+			&& !$modified->{machine} # detects deletion
+		    ) {
+			eval {
+			    my $machine_string =
+				PVE::QemuServer::Machine::check_and_pin_machine_string(
+				    $conf->{machine}, $param->{ostype});
+			    $conf->{pending}->{machine} = $machine_string if $machine_string;
+			};
+			print "automatic pinning of machine version failed - $@" if $@;
+		    }
+		    $conf->{pending}->{$opt} = $param->{$opt};
+		} elsif ($opt eq 'cipassword') {
+		    if (!PVE::QemuServer::Helpers::windows_version($conf->{ostype})) {
+			# Same logic as in cloud-init (but with the regex fixed...)
+			$param->{cipassword} = PVE::Tools::encrypt_pw($param->{cipassword})
+			    if $param->{cipassword} !~ /^\$(?:[156]|2[ay])(\$.+){2}/;
+		    }
+		    $conf->{cipassword} = $param->{cipassword};
 		} else {
 		    $conf->{pending}->{$opt} = $param->{$opt};
 
@@ -2132,7 +2352,7 @@ __PACKAGE__->register_method({
     method => 'POST',
     protected => 1,
     proxyto => 'node',
-    description => "Set virtual machine options (asynchrounous API).",
+    description => "Set virtual machine options (asynchronous API).",
     permissions => {
 	check => ['perm', '/vms/{vmid}', $vm_config_perm_list, any => 1],
     },
@@ -2172,6 +2392,13 @@ __PACKAGE__->register_method({
 		    maximum => 30,
 		    optional => 1,
 		},
+		'import-working-storage' => get_standard_option('pve-storage-id', {
+		    description => "A file-based storage with 'images' content-type enabled, which"
+			." is used as an intermediary extraction storage during import. Defaults to"
+			." the source storage.",
+		    optional => 1,
+		    completion => \&PVE::QemuServer::complete_storage,
+		}),
 	    },
 	    1, # with_disk_alloc
 	),
@@ -2189,7 +2416,7 @@ __PACKAGE__->register_method({
     method => 'PUT',
     protected => 1,
     proxyto => 'node',
-    description => "Set virtual machine options (synchrounous API) - You should consider using the POST method instead for any actions involving hotplug or storage allocation.",
+    description => "Set virtual machine options (synchronous API) - You should consider using the POST method instead for any actions involving hotplug or storage allocation.",
     permissions => {
 	check => ['perm', '/vms/{vmid}', $vm_config_perm_list, any => 1],
     },
@@ -2458,7 +2685,7 @@ __PACKAGE__->register_method({
 	my $serial;
 	if ($conf->{vga}) {
 	    my $vga = PVE::QemuServer::parse_vga($conf->{vga});
-	    $serial = $vga->{type} if $vga->{type} =~ m/^serial\d+$/;
+	    $serial = $vga->{type} if defined($vga->{type}) && $vga->{type} =~ m/^serial\d+$/;
 	}
 
 	my $authpath = "/vms/$vmid";
@@ -2478,7 +2705,7 @@ __PACKAGE__->register_method({
 	if ($node ne 'localhost' && $node ne PVE::INotify::nodename()) {
 	    (undef, $family) = PVE::Cluster::remote_node_ip($node);
 	    my $sshinfo = PVE::SSHInfo::get_ssh_info($node);
-	    # NOTE: kvm VNC traffic is already TLS encrypted or is known unsecure
+	    # NOTE: kvm VNC traffic is already TLS encrypted or is known insecure
 	    $remcmd = PVE::SSHInfo::ssh_info_to_command($sshinfo, defined($serial) ? '-t' : '-T');
 	} else {
 	    $family = PVE::Tools::get_host_address_family($node);
@@ -2608,7 +2835,7 @@ __PACKAGE__->register_method({
 	if (!defined($serial)) {
 	    if ($conf->{vga}) {
 		my $vga = PVE::QemuServer::parse_vga($conf->{vga});
-		$serial = $vga->{type} if $vga->{type} =~ m/^serial\d+$/;
+		$serial = $vga->{type} if defined($vga->{type}) && $vga->{type} =~ m/^serial\d+$/;
 	    }
 	}
 
@@ -2706,7 +2933,7 @@ __PACKAGE__->register_method({
 
 	my $conf = PVE::QemuConfig->load_config($vmid, $node); # VM exists ?
 
-	# Note: VNC ports are acessible from outside, so we do not gain any
+	# Note: VNC ports are accessible from outside, so we do not gain any
 	# security if we verify that $param->{port} belongs to VM $vmid. This
 	# check is done by verifying the VNC ticket (inside VNC protocol).
 
@@ -3736,13 +3963,15 @@ __PACKAGE__->register_method({
 	    my $storecfg = PVE::Storage::config();
 
 	    if ($storage) {
-		# check if storage is enabled on local node
-		PVE::Storage::storage_check_enabled($storecfg, $storage);
+		# check if storage is enabled on local node and supports vm images
+		my $scfg = PVE::Storage::storage_check_enabled($storecfg, $storage);
+		raise_param_exc({ storage => "storage '$storage' does not support vm images" })
+		    if !$scfg->{content}->{images};
+
 		if ($target) {
 		    # check if storage is available on target node
 		    PVE::Storage::storage_check_enabled($storecfg, $storage, $target);
 		    # clone only works if target storage is shared
-		    my $scfg = PVE::Storage::storage_config($storecfg, $storage);
 		    die "can't clone to non-shared storage '$storage'\n"
 			if !$scfg->{shared};
 		}
@@ -3786,7 +4015,7 @@ __PACKAGE__->register_method({
 	    my $fullclone = {};
 	    my $vollist = [];
 
-	    foreach my $opt (keys %$oldconf) {
+	    for my $opt (sort keys %$oldconf) {
 		my $value = $oldconf->{$opt};
 
 		# do not copy snapshot related info
@@ -3811,18 +4040,22 @@ __PACKAGE__->register_method({
 		    if (PVE::QemuServer::drive_is_cdrom($drive, 1)) {
 			$newconf->{$opt} = $value; # simply copy configuration
 		    } else {
-			if ($full || PVE::QemuServer::drive_is_cloudinit($drive)) {
-			    die "Full clone feature is not supported for drive '$opt'\n"
-				if !PVE::Storage::volume_has_feature($storecfg, 'copy', $drive->{file}, $snapname, $running);
+			my $volid = $drive->{file};
+			my $msg = "clone feature is not supported for";
+			$msg .= " a snapshot of" if $snapname;
+			$msg .= " '$volid' ($opt)";
+			if ($full || PVE::QemuServer::drive_is_cloudinit($drive) || $opt eq 'tpmstate0') {
+			    die "Full $msg\n"
+				if !PVE::Storage::volume_has_feature($storecfg, 'copy', $volid, $snapname, $running);
 			    $fullclone->{$opt} = 1;
 			} else {
 			    # not full means clone instead of copy
-			    die "Linked clone feature is not supported for drive '$opt'\n"
-				if !PVE::Storage::volume_has_feature($storecfg, 'clone', $drive->{file}, $snapname, $running);
+			    die "Linked $msg\n"
+				if !PVE::Storage::volume_has_feature($storecfg, 'clone', $volid, $snapname, $running);
 			}
 			$drives->{$opt} = $drive;
 			next if PVE::QemuServer::drive_is_cloudinit($drive);
-			push @$vollist, $drive->{file};
+			push @$vollist, $volid;
 		    }
 		} else {
 		    # copy everything else
@@ -3941,7 +4174,7 @@ __PACKAGE__->register_method({
 
 		if ($target) {
 		    if (!$running) {
-			# always deactivate volumes – avoids that LVM LVs are active on several nodes
+			# always deactivate volumes - avoids that LVM LVs are active on several nodes
 			eval { PVE::Storage::deactivate_volumes($storecfg, $vollist, $snapname) };
 			# but only warn when that fails (e.g., parallel clones keeping them active)
 			log_warn($@) if $@;
@@ -3975,7 +4208,7 @@ __PACKAGE__->register_method({
 	    return;
 	};
 
-	# Aquire exclusive lock lock for $newid
+	# Acquire exclusive lock lock for $newid
 	my $lock_target_vm = sub {
 	    return PVE::QemuConfig->lock_config_full($newid, 1, $clonefn);
 	};
@@ -4113,6 +4346,10 @@ __PACKAGE__->register_method({
 
 	    die "you can't move to the same storage with same format\n"
 		if $oldstoreid eq $storeid && (!$format || !$oldfmt || $oldfmt eq $format);
+
+	    my $scfg = PVE::Storage::storage_check_enabled($storecfg, $storeid);
+	    raise_param_exc({ storage => "storage '$storeid' does not support vm images" })
+		if !$scfg->{content}->{images};
 
 	    # this only checks snapshots because $disk is passed!
 	    my $snapshotted = PVE::QemuServer::Drive::is_volume_in_use(
@@ -4476,30 +4713,84 @@ __PACKAGE__->register_method({
 	},
     },
     returns => {
+	# TODO 9.x: rework the api call to return more sensible structures
+	# e.g. a simple list of nodes with their blockers and/or notices to show
 	type => "object",
 	properties => {
-	    running => { type => 'boolean' },
+	    running => {
+		type => 'boolean',
+		description => "Determines if the VM is running.",
+	    },
 	    allowed_nodes => {
 		type => 'array',
+		items => {
+		    type => 'string',
+		    description => "An allowed node",
+		},
 		optional => 1,
-		description => "List nodes allowed for offline migration, only passed if VM is offline"
+		description => "List of nodes allowed for migration.",
 	    },
 	    not_allowed_nodes => {
 		type => 'object',
 		optional => 1,
-		description => "List not allowed nodes with additional informations, only passed if VM is offline"
+		properties =>  {
+		    unavailable_storages => {
+			type => 'array',
+			optional => 1,
+			description => 'A list of not available storages.',
+			items => {
+			    type => 'string',
+			    description => 'A storage',
+			},
+		    },
+		},
+		description => "List of not allowed nodes with additional information.",
 	    },
 	    local_disks => {
 		type => 'array',
-		description => "List local disks including CD-Rom, unsused and not referenced disks"
+		items => {
+		    type => 'object',
+		    properties => {
+			size => {
+			    type => 'integer',
+			    description => 'The size of the disk in bytes.',
+			},
+			volid => {
+			    type => 'string',
+			    description => 'The volid of the disk.',
+			},
+			cdrom => {
+			    type => 'boolean',
+			    description => 'True if the disk is a cdrom.',
+			},
+			is_unused => {
+			    type => 'boolean',
+			    description => 'True if the disk is unused.',
+			},
+		    },
+		},
+		description => "List local disks including CD-Rom, unused and not referenced disks"
 	    },
 	    local_resources => {
 		type => 'array',
-		description => "List local resources e.g. pci, usb"
+		items => {
+		    type => 'string',
+		    description => "A local resource",
+		},
+		description => "List local resources (e.g. pci, usb) that block migration."
 	    },
+	    # FIXME: remove with 9.0
 	    'mapped-resources' => {
 		type => 'array',
-		description => "List of mapped resources e.g. pci, usb"
+		items => {
+		    type => 'string',
+		    description => "A mapped resource",
+		},
+		description => "List of mapped resources e.g. pci, usb. Deprecated, use 'mapped-resource-info' instead."
+	    },
+	    'mapped-resource-info' => {
+		type => 'object',
+		description => "Object of mapped resources with additional information such if they're live migratable.",
 	    },
 	},
     },
@@ -4530,41 +4821,45 @@ __PACKAGE__->register_method({
 	$res->{running} = PVE::QemuServer::check_running($vmid) ? 1:0;
 
 	my ($local_resources, $mapped_resources, $missing_mappings_by_node) =
-	    PVE::QemuServer::check_local_resources($vmconf, 1);
-	delete $missing_mappings_by_node->{$localnode};
+	    PVE::QemuServer::check_local_resources($vmconf, $res->{running}, 1);
 
 	my $vga = PVE::QemuServer::parse_vga($vmconf->{vga});
 	if ($res->{running} && $vga->{'clipboard'} && $vga->{'clipboard'} eq 'vnc') {
 	    push $local_resources->@*, "clipboard=vnc";
 	}
 
-	# if vm is not running, return target nodes where local storage/mapped devices are available
-	# for offline migration
-	if (!$res->{running}) {
-	    $res->{allowed_nodes} = [];
-	    my $checked_nodes = PVE::QemuServer::check_local_storage_availability($vmconf, $storecfg);
-	    delete $checked_nodes->{$localnode};
+	$res->{allowed_nodes} = [];
+	$res->{not_allowed_nodes} = {};
 
-	    foreach my $node (keys %$checked_nodes) {
-		my $missing_mappings = $missing_mappings_by_node->{$node};
-		if (scalar($missing_mappings->@*)) {
-		    $checked_nodes->{$node}->{'unavailable-resources'} = $missing_mappings;
-		    next;
-		}
+	my $storage_nodehash = PVE::QemuServer::check_local_storage_availability($vmconf, $storecfg);
 
-		if (!defined($checked_nodes->{$node}->{unavailable_storages})) {
-		    push @{$res->{allowed_nodes}}, $node;
-		}
+	my $nodelist = PVE::Cluster::get_nodelist();
+	for my $node ($nodelist->@*) {
+	    next if $node eq $localnode;
 
+	    # extract missing storage info
+	    if (my $storage_info = $storage_nodehash->{$node}) {
+		$res->{not_allowed_nodes}->{$node} = $storage_info;
 	    }
-	    $res->{not_allowed_nodes} = $checked_nodes;
+
+	    # extract missing mappings info
+	    my $missing_mappings = $missing_mappings_by_node->{$node};
+	    if (scalar($missing_mappings->@*)) {
+		$res->{not_allowed_nodes}->{$node}->{'unavailable-resources'} = $missing_mappings;
+	    }
+
+	    # if nothing came up, add it to the allowed nodes
+	    if (scalar($res->{not_allowed_nodes}->{$node}->%*) == 0) {
+		push $res->{allowed_nodes}->@*, $node;
+	    }
 	}
 
 	my $local_disks = &$check_vm_disks_local($storecfg, $vmconf, $vmid);
-	$res->{local_disks} = [ values %$local_disks ];;
+	$res->{local_disks} = [ values %$local_disks ];
 
 	$res->{local_resources} = $local_resources;
-	$res->{'mapped-resources'} = $mapped_resources;
+	$res->{'mapped-resources'} = [ sort keys $mapped_resources->%* ];
+	$res->{'mapped-resource-info'} = $mapped_resources;
 
 	return $res;
 
@@ -5017,7 +5312,7 @@ __PACKAGE__->register_method({
 
             my $conf = PVE::QemuConfig->load_config($vmid);
 
-            die "checksum missmatch (file change by other user?)\n"
+            die "checksum mismatch (file change by other user?)\n"
                 if $digest && $digest ne $conf->{digest};
             PVE::QemuConfig->check_lock($conf) if !$skiplock;
 
@@ -5217,6 +5512,9 @@ __PACKAGE__->register_method({
 
 	die "unable to use snapshot name 'pending' (reserved name)\n"
 	    if lc($snapname) eq 'pending';
+
+	my $vmconf = PVE::QemuConfig->load_config($vmid);
+	PVE::QemuServer::check_non_migratable_resources($vmconf, $param->{vmstate}, 0);
 
 	my $realcmd = sub {
 	    PVE::Cluster::log_msg('info', $authuser, "snapshot VM $vmid: $snapname");
@@ -5783,8 +6081,24 @@ __PACKAGE__->register_method({
 		    # not handled by update_vm_api
 		    my $vmgenid = delete $new_conf->{vmgenid};
 		    my $meta = delete $new_conf->{meta};
-		    my $cloudinit = delete $new_conf->{cloudinit}; # this is informational only
+
+		    my $special_sections = delete $new_conf->{'special-sections'} // {};
+
+		    # fleecing state is specific to source side
+		    delete $special_sections->{fleecing};
+
 		    $new_conf->{skip_cloud_init} = 1; # re-use image from source side
+
+		    # TODO PVE 10 - remove backwards-compat handling?
+		    my $cloudinit = delete $new_conf->{cloudinit};
+		    if ($cloudinit) {
+			if ($special_sections->{cloudinit}) {
+			    warn "config has duplicate special 'cloudinit' sections - skipping"
+				." legacy variant\n";
+			} else {
+			    $special_sections->{cloudinit} = $cloudinit;
+			}
+		    }
 
 		    $new_conf->{vmid} = $state->{vmid};
 		    $new_conf->{node} = $node;
@@ -5807,7 +6121,7 @@ __PACKAGE__->register_method({
 		    $conf->{lock} = 'migrate';
 		    $conf->{vmgenid} = $vmgenid if defined($vmgenid);
 		    $conf->{meta} = $meta if defined($meta);
-		    $conf->{cloudinit} = $cloudinit if defined($cloudinit);
+		    $conf->{'special-sections'} = $special_sections;
 		    PVE::QemuConfig->write_config($state->{vmid}, $conf);
 
 		    $state->{lock} = 'migrate';
@@ -5909,7 +6223,7 @@ __PACKAGE__->register_method({
 		    return;
 		},
 		'nbdstop' => sub {
-		    PVE::QemuServer::nbd_stop($state->{vmid});
+		    PVE::QemuServer::QMPHelpers::nbd_stop($state->{vmid});
 		    return;
 		},
 		'resume' => sub {

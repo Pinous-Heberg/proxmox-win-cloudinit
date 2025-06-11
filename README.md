@@ -48,7 +48,7 @@ Use Cloudbase-Init with Windows VMs to:
 Install required Perl modules:
 ```bash
 apt-get update
-apt-get install libcrypt-cbc-perl libcrypt-cipher-aes-perl libmime-base64-perl
+apt-get install libcrypt-cbc-perl libmime-base64-perl
 ```
 
 ### Automatic Patch Application

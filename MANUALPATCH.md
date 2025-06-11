@@ -23,12 +23,20 @@ apt-get install libcrypt-cbc-perl libcrypt-cipher-aes-perl libmime-base64-perl
 
 ### 1. Install PasswordUtils Module
 
-Create the new password utilities module:
+Download and install the new password utilities module:
 
 **File Location:** `/usr/share/perl5/PVE/QemuServer/PasswordUtils.pm`
 
-Copy the entire content from `proxmox-patch/sourcefiles/PasswordUtils.pm` to the target location:
+```bash
+# Download the PasswordUtils module directly from the repository
+wget https://raw.githubusercontent.com/Pinous-Heberg/proxmox-win-cloudinit/main/proxmox-patch/sourcefiles/PasswordUtils.pm -O /usr/share/perl5/PVE/QemuServer/PasswordUtils.pm
 
+# Set proper ownership and permissions
+chown root:root /usr/share/perl5/PVE/QemuServer/PasswordUtils.pm
+chmod 644 /usr/share/perl5/PVE/QemuServer/PasswordUtils.pm
+```
+
+**Alternative method (if you have the local file):**
 ```bash
 cp proxmox-patch/sourcefiles/PasswordUtils.pm /usr/share/perl5/PVE/QemuServer/PasswordUtils.pm
 chown root:root /usr/share/perl5/PVE/QemuServer/PasswordUtils.pm
@@ -247,3 +255,66 @@ After applying the patches:
     ```perl5
     $meta_data = configdrive2_gen_metadata($conf, $vmid, $user_data, $network_data);
     ```
+
+## Troubleshooting and Reversal
+
+### Complete Removal (Uninstallation)
+
+If you need to completely remove the patches and revert to the original functionality:
+
+1. **Remove PasswordUtils module:**
+```bash
+rm -f /usr/share/perl5/PVE/QemuServer/PasswordUtils.pm
+```
+
+2. **Restore original files from backups:**
+```bash
+# If you have .orig backup files from patching
+cp /usr/share/perl5/PVE/API2/Qemu.pm.orig /usr/share/perl5/PVE/API2/Qemu.pm
+cp /usr/share/perl5/PVE/QemuServer/Cloudinit.pm.orig /usr/share/perl5/PVE/QemuServer/Cloudinit.pm
+```
+
+3. **Or reinstall qemu-server package:**
+```bash
+apt reinstall qemu-server
+```
+
+4. **Restart Proxmox services:**
+```bash
+systemctl restart pvedaemon
+systemctl restart pveproxy
+```
+
+### Verification
+
+After installation, verify that the modules are properly loaded:
+
+```bash
+# Check if PasswordUtils module exists and is readable
+ls -la /usr/share/perl5/PVE/QemuServer/PasswordUtils.pm
+
+# Test Perl syntax
+perl -c /usr/share/perl5/PVE/QemuServer/PasswordUtils.pm
+perl -c /usr/share/perl5/PVE/API2/Qemu.pm
+perl -c /usr/share/perl5/PVE/QemuServer/Cloudinit.pm
+
+# Check Proxmox services status
+systemctl status pvedaemon
+systemctl status pveproxy
+```
+
+### Common Issues
+
+1. **"Can't locate PasswordUtils.pm" error:**
+   - Ensure the file is in the correct location: `/usr/share/perl5/PVE/QemuServer/PasswordUtils.pm`
+   - Check file permissions: `chmod 644 /usr/share/perl5/PVE/QemuServer/PasswordUtils.pm`
+
+2. **Perl syntax errors:**
+   - Verify all manual edits were applied correctly
+   - Check for missing commas, brackets, or semicolons
+   - Use `perl -c filename.pm` to check syntax
+
+3. **Service restart failures:**
+   - Check logs: `journalctl -u pvedaemon -u pveproxy`
+   - Verify all files have correct syntax
+   - Ensure all required Perl modules are installed

@@ -48,7 +48,7 @@ Use Cloudbase-Init with Windows VMs to:
 Install required Perl modules:
 ```bash
 apt-get update
-apt-get install libcrypt-cbc-perl libmime-base64-perl
+apt-get install libcrypt-cbc-perl libmime-base64-perl libdigest-sha-perl
 ```
 
 ### Automatic Patch Application
@@ -66,8 +66,8 @@ apt reinstall qemu-server
 
 3. **Apply patches:**
 ```bash
-# Install PasswordUtils module
-patch --force --forward --backup -p0 --directory / --input "/absolute/path/to/PasswordUtils.pm.patch"
+# Download and install PasswordUtils module
+wget https://raw.githubusercontent.com/Pinous-Heberg/proxmox-win-cloudinit/main/proxmox-patch/sourcefiles/PasswordUtils.pm -O /usr/share/perl5/PVE/QemuServer/PasswordUtils.pm
 
 # Apply Qemu.pm patch
 patch --force --forward --backup -p0 --directory / --input "/absolute/path/to/Qemu.pm.patch"
@@ -86,9 +86,14 @@ systemctl restart pveproxy
 
 For manual installation instructions, see: [Manual Patching Guide](MANUALPATCH.md)
 
+**Note:** The manual installation includes downloading the PasswordUtils.pm module directly from the repository since it's a new file (not a patch) that needs to be placed in `/usr/share/perl5/PVE/QemuServer/PasswordUtils.pm`.
+
 ### Patch Reversal
 ```bash
 patch --force --reverse --backup -p0 --directory / --input "/absolute/path/to/patchfile.pm.patch"
+
+# Don't forget to remove the PasswordUtils module if reverting:
+rm -f /usr/share/perl5/PVE/QemuServer/PasswordUtils.pm
 ```
 ```sh
 wget https://raw.githubusercontent.com/Pinous-Heberg/proxmox-win-cloudinit/main/proxmox-patch/checkupdate.sh -O /opt/checkupdate.sh

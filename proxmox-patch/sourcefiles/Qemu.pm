@@ -3262,6 +3262,110 @@ __PACKAGE__->register_method({
 		};
 
 		PVE::QemuServer::vm_start($storecfg, $vmid, $params, $migrate_opts);
+		
+		# Auto-déclenchement du remplacement de mot de passe pour les VMs Windows
+		# Démarrer le processus en arrière-plan seulement quand l'agent renvoie des infos réseau
+		if (!$migratedfrom) { # Ne pas déclencher pendant une migration
+		    eval {
+			print "INFO: Scheduling password replacement task for VM $vmid (waiting for network info from guest agent)\n";
+			
+			# Créer un worker en arrière-plan pour gérer le remplacement de mot de passe
+			my $password_worker = sub {
+			    print "INFO: Password replacement worker started for VM $vmid\n";
+			    
+			    # Initialiser le gestionnaire de signal d'arrêt
+			    PVE::QemuServer::Cloudinit::reset_password_task_stop_flag();
+			    
+			    # Configurer le gestionnaire de signal TERM pour arrêt propre
+			    $SIG{TERM} = sub {
+				print "INFO: Received TERM signal for password replacement task for VM $vmid\n";
+				PVE::QemuServer::Cloudinit::stop_password_replacement_task($vmid);
+			    };
+			    
+			    # Attendre que l'agent soit prêt ET renvoie des informations réseau
+			    print "INFO: Waiting for guest agent network information for VM $vmid before password replacement (no timeout)\n";
+			    
+			    my $network_check_interval = 10; # Vérification toutes les 10 secondes
+			    my $network_wait_time = 0;
+			    my $network_info_available = 0;
+			    
+			    while (!$network_info_available) {
+				# Vérifier si la VM est toujours en cours d'exécution
+				if (!PVE::QemuServer::check_running($vmid)) {
+				    print "INFO: VM $vmid is no longer running, stopping password replacement task\n";
+				    last;
+				}
+				
+				sleep($network_check_interval);
+				$network_wait_time += $network_check_interval;
+				
+				print "DEBUG: Checking for network information from guest agent for VM $vmid (waited ${network_wait_time}s, no timeout)\n";
+				
+				eval {
+				    # Vérifier que l'agent répond d'abord - continuer jusqu'à ce qu'il réponde
+				    my $ping_result = PVE::QemuServer::Monitor::mon_cmd($vmid, 'guest-ping');
+				    if ($ping_result) {
+					print "DEBUG: Guest agent ping successful for VM $vmid, checking network info...\n";
+					
+					# Essayer d'obtenir les informations réseau
+					my $network_result = PVE::QemuServer::Monitor::mon_cmd($vmid, 'guest-network-get-interfaces');
+					if ($network_result && ref($network_result) eq 'ARRAY' && @$network_result > 0) {
+					    # Vérifier qu'il y a des interfaces avec des adresses IP
+					    my $has_ip = 0;
+					    foreach my $interface (@$network_result) {
+						if ($interface->{'ip-addresses'} && @{$interface->{'ip-addresses'}} > 0) {
+						    foreach my $ip (@{$interface->{'ip-addresses'}}) {
+							if ($ip->{'ip-address'} && $ip->{'ip-address'} ne '127.0.0.1' && $ip->{'ip-address'} !~ /^::1/) {
+							    $has_ip = 1;
+							    print "DEBUG: Found network interface with IP $ip->{'ip-address'} for VM $vmid\n";
+							    last;
+							}
+						    }
+						    last if $has_ip;
+						}
+					    }
+					    
+					    if ($has_ip) {
+						print "SUCCESS: Guest agent network information available for VM $vmid after ${network_wait_time}s\n";
+						$network_info_available = 1;
+						last;
+					    } else {
+						print "DEBUG: Network interfaces found but no valid IP addresses yet for VM $vmid\n";
+					    }
+					} else {
+					    print "DEBUG: No network interfaces reported by guest agent for VM $vmid yet\n";
+					}
+				    }
+				};
+				
+				if ($@) {
+				    my $error_msg = $@;
+				    $error_msg =~ s/\n/ /g;
+				    print "DEBUG: Guest agent network check failed for VM $vmid: $error_msg\n";
+				}
+			    }
+			    
+			    # Une fois les informations réseau obtenues, continuer
+			    print "INFO: Network information confirmed for VM $vmid, waiting additional time for agent stabilization...\n";
+			    
+			    # Attendre un délai supplémentaire pour que l'agent soit complètement stable
+			    my $stabilization_delay = 30; # 30 secondes de stabilisation
+			    print "DEBUG: Waiting ${stabilization_delay}s for agent stabilization for VM $vmid\n";
+			    sleep($stabilization_delay);
+			    
+			    print "INFO: Starting password replacement process for VM $vmid after agent stabilization\n";
+			    PVE::QemuServer::Cloudinit::auto_replace_password_post_start($vmid);
+			};
+			
+			# Démarrer le worker en arrière-plan sans attendre
+			my $upid = $rpcenv->fork_worker('qm-password-replace', $vmid, $authuser, $password_worker, 1);
+			print "INFO: Password replacement worker scheduled for VM $vmid with UPID: $upid\n";
+		    };
+		    if ($@) {
+			warn "Failed to start password replacement worker for VM $vmid: $@\n";
+		    }
+		}
+		
 		return;
 	    };
 
@@ -3357,6 +3461,41 @@ __PACKAGE__->register_method({
 		my $upid = shift;
 
 		syslog('info', "stop VM $vmid: $upid\n");
+
+		# Arrêter immédiatement les tâches de remplacement de mot de passe pour cette VM
+		eval {
+		    print "INFO: Immediately stopping password replacement tasks for VM $vmid...\n";
+		    my $active_workers = PVE::RPCEnvironment::active_workers();
+		    my $killed_tasks = 0;
+		    
+		    foreach my $worker (@$active_workers) {
+			if ($worker->{type} eq 'qm-password-replace' && $worker->{id} eq $vmid) {
+			    print "INFO: Found active password replacement task for VM $vmid (UPID: $worker->{upid}, PID: $worker->{pid})\n";
+			    eval {
+				if ($worker->{pid}) {
+				    # Tuer immédiatement le processus
+				    PVE::Tools::kill_process($worker->{pid}, 'KILL');
+				    print "SUCCESS: Killed password replacement task PID $worker->{pid} for VM $vmid\n";
+				    $killed_tasks++;
+				} else {
+				    print "WARN: No PID found for password replacement task of VM $vmid\n";
+				}
+			    };
+			    if ($@) {
+				print "ERROR: Failed to kill password replacement task for VM $vmid: $@\n";
+			    }
+			}
+		    }
+		    
+		    if ($killed_tasks > 0) {
+			print "SUCCESS: Killed $killed_tasks password replacement task(s) for VM $vmid\n";
+		    } else {
+			print "DEBUG: No active password replacement tasks found for VM $vmid\n";
+		    }
+		};
+		if ($@) {
+		    print "ERROR: Error while stopping password replacement tasks for VM $vmid: $@\n";
+		}
 
 		if ($overrule_shutdown) {
 		    my $overruled_tasks = PVE::GuestHelpers::abort_guest_tasks(
@@ -3520,6 +3659,41 @@ __PACKAGE__->register_method({
 		my $upid = shift;
 
 		syslog('info', "shutdown VM $vmid: $upid\n");
+
+		# Arrêter immédiatement les tâches de remplacement de mot de passe pour cette VM
+		eval {
+		    print "INFO: Immediately stopping password replacement tasks for VM $vmid during shutdown...\n";
+		    my $active_workers = PVE::RPCEnvironment::active_workers();
+		    my $killed_tasks = 0;
+		    
+		    foreach my $worker (@$active_workers) {
+			if ($worker->{type} eq 'qm-password-replace' && $worker->{id} eq $vmid) {
+			    print "INFO: Found active password replacement task for VM $vmid (UPID: $worker->{upid}, PID: $worker->{pid})\n";
+			    eval {
+				if ($worker->{pid}) {
+				    # Tuer immédiatement le processus
+				    PVE::Tools::kill_process($worker->{pid}, 'KILL');
+				    print "SUCCESS: Killed password replacement task PID $worker->{pid} for VM $vmid\n";
+				    $killed_tasks++;
+				} else {
+				    print "WARN: No PID found for password replacement task of VM $vmid\n";
+				}
+			    };
+			    if ($@) {
+				print "ERROR: Failed to kill password replacement task for VM $vmid: $@\n";
+			    }
+			}
+		    }
+		    
+		    if ($killed_tasks > 0) {
+			print "SUCCESS: Killed $killed_tasks password replacement task(s) for VM $vmid during shutdown\n";
+		    } else {
+			print "DEBUG: No active password replacement tasks found for VM $vmid during shutdown\n";
+		    }
+		};
+		if ($@) {
+		    print "ERROR: Error while stopping password replacement tasks for VM $vmid during shutdown: $@\n";
+		}
 
 		PVE::QemuServer::vm_stop($storecfg, $vmid, $skiplock, 0, $param->{timeout},
 					 $shutdown, $param->{forceStop}, $keepActive);

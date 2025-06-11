@@ -323,12 +323,21 @@ sub cloudbase_configdrive2_metadata {
 	    'content_path' => '/content/0000',
 	},
     };
-    # For Windows VMs, decrypt the password before sending to cloud-init
+    # For Windows VMs, handle password encryption based on context
     if ($conf->{cipassword}) {
-	if ($conf->{cipassword} =~ /^\$5\$/ || $conf->{cipassword} =~ /^\$5\$/) {
-	    $meta_data->{'admin_pass'} = PVE::QemuServer::PasswordUtils::decrypt_pw_reversible($conf->{cipassword}, $vmid);
-	} else {
+	# Check if we should keep encrypted passwords (during regeneration)
+	if ($conf->{'_keep_encrypted_passwords'}) {
+	    # During regeneration for encrypted delivery, keep password encrypted
 	    $meta_data->{'admin_pass'} = $conf->{cipassword};
+	    print "DEBUG: Keeping password encrypted for cloud-init regeneration (VM $vmid)\n";
+	} elsif ($conf->{cipassword} =~ /^\$5\$/) {
+	    # Normal operation: decrypt the password before sending to cloud-init
+	    $meta_data->{'admin_pass'} = PVE::QemuServer::PasswordUtils::decrypt_pw_reversible($conf->{cipassword}, $vmid);
+	    print "DEBUG: Decrypted password for cloud-init delivery (VM $vmid)\n";
+	} else {
+	    # Clear text password, use as-is
+	    $meta_data->{'admin_pass'} = $conf->{cipassword};
+	    print "DEBUG: Using clear text password for cloud-init (VM $vmid)\n";
 	}
     }
     if (defined(my $keys = $conf->{sshkeys})) {
@@ -732,6 +741,293 @@ sub dump_cloudinit_config {
 	    return configdrive2_gen_metadata($user, $network);
 	}
     }
+}
+
+sub regenerate_cloudinit_with_encrypted_passwords {
+    my ($vmid, $conf) = @_;
+    
+    print "DEBUG: Starting regenerate_cloudinit_with_encrypted_passwords for VM $vmid\n";
+    
+    # Vérifier si c'est une VM Windows
+    if (!PVE::QemuServer::Helpers::windows_version($conf->{ostype})) {
+        print "DEBUG: VM $vmid is not a Windows VM (ostype: $conf->{ostype})\n";
+        return 0;
+    }
+    
+    if (!$conf->{cipassword}) {
+        print "DEBUG: VM $vmid does not have cipassword configured\n";
+        return 0;
+    }
+    
+    # Vérifier si le mot de passe est chiffré
+    if ($conf->{cipassword} !~ /^\$5\$/) {
+        print "DEBUG: VM $vmid password is not encrypted (format: " . substr($conf->{cipassword}, 0, 10) . "...)\n";
+        return 0;
+    }
+    
+    print "INFO: VM $vmid is Windows with encrypted password, regenerating cloud-init with fully encrypted data...\n";
+    
+    # Au lieu d'essayer de modifier le config-2 en lecture seule, 
+    # on régénère complètement le cloud-init avec les mots de passe déjà chiffrés
+    
+    eval {
+        print "INFO: Regenerating cloud-init configuration for VM $vmid with encrypted passwords...\n";
+        
+        # Sauvegarder la configuration actuelle
+        my $backup_conf = { %$conf };
+        
+        # Marquer qu'on veut garder les mots de passe chiffrés (ne pas les déchiffrer)
+        # En modifiant temporairement le processus de génération
+        $conf->{'_keep_encrypted_passwords'} = 1;
+        
+        # Régénérer le cloud-init avec cette configuration
+        my $has_changes = generate_cloudinit_config($conf, $vmid);
+        
+        if ($has_changes) {
+            print "SUCCESS: Cloud-init regenerated with encrypted passwords for VM $vmid\n";
+            
+            # Nettoyer le flag temporaire
+            delete $conf->{'_keep_encrypted_passwords'};
+            
+            # Marquer les changements comme appliqués
+            delete $conf->{'special-sections'}->{cloudinit};
+            PVE::QemuConfig->write_config($vmid, $conf);
+            
+            print "INFO: Cloud-init configuration updated and saved for VM $vmid\n";
+            return 1;
+        } else {
+            print "INFO: No cloud-init changes needed for VM $vmid\n";
+            delete $conf->{'_keep_encrypted_passwords'};
+            return 1;
+        }
+    };
+    
+    if ($@) {
+        print "ERROR: Failed to regenerate cloud-init for VM $vmid: $@\n";
+        return 0;
+    }
+    
+    return 0;
+}
+
+# Variable globale pour gérer l'arrêt des tâches
+my $password_task_should_stop = 0;
+
+# Gestionnaire de signal pour arrêter proprement les tâches de remplacement de mot de passe
+sub stop_password_replacement_task {
+    my ($vmid) = @_;
+    
+    print "INFO: Received stop signal for password replacement task for VM $vmid\n";
+    $password_task_should_stop = 1;
+    
+    # Enregistrer l'arrêt dans les logs
+    print "DEBUG: Password replacement task for VM $vmid will stop at next check point\n";
+}
+
+# Fonction pour vérifier si la tâche doit s'arrêter
+sub should_stop_password_task {
+    return $password_task_should_stop;
+}
+
+# Réinitialiser le flag d'arrêt
+sub reset_password_task_stop_flag {
+    $password_task_should_stop = 0;
+}
+
+sub auto_replace_password_post_start {
+    my ($vmid) = @_;
+    
+    my $start_time = time();
+    print "INFO: ===== AUTO PASSWORD REPLACEMENT WORKER STARTED =====\n";
+    print "INFO: Worker started for VM $vmid at " . localtime($start_time) . "\n";
+    print "DEBUG: Process PID: $$, User: " . getpwuid($<) . "\n";
+    
+    # Cette fonction sera appelée automatiquement après le démarrage de la VM
+    # et la détection de l'agent qemu
+    
+    eval {
+        print "DEBUG: Loading VM configuration for VM $vmid...\n";
+        my $conf = PVE::QemuConfig->load_config($vmid);
+        print "SUCCESS: Configuration loaded for VM $vmid\n";
+        
+        # Afficher les informations de configuration pertinentes
+        my $ostype = $conf->{ostype} || 'undefined';
+        my $agent_enabled = $conf->{agent} ? 'enabled' : 'disabled';
+        my $has_cipassword = $conf->{cipassword} ? 'present' : 'absent';
+        my $memory = $conf->{memory} || 'undefined';
+        my $cores = $conf->{cores} || 'undefined';
+        
+        print "DEBUG: VM $vmid configuration summary:\n";
+        print "DEBUG:   - OS Type: $ostype\n";
+        print "DEBUG:   - Agent: $agent_enabled\n";
+        print "DEBUG:   - CI Password: $has_cipassword\n";
+        print "DEBUG:   - Memory: ${memory}MB\n";
+        print "DEBUG:   - Cores: $cores\n";
+        
+        # Vérification 1: OS Windows
+        print "DEBUG: Phase 1 - Checking if VM $vmid is Windows...\n";
+        if (!PVE::QemuServer::Helpers::windows_version($conf->{ostype})) {
+            print "INFO: VM $vmid is not Windows (OS: $ostype), password replacement not applicable\n";
+            print "DEBUG: Supported Windows OS types: win10, win11, w2k16, w2k19, w2k22, etc.\n";
+            return;
+        }
+        print "SUCCESS: VM $vmid is Windows ($ostype)\n";
+        
+        # Vérification 2: Agent activé
+        print "DEBUG: Phase 2 - Checking if qemu-guest-agent is enabled for VM $vmid...\n";
+        if (!$conf->{agent}) {
+            print "INFO: VM $vmid does not have qemu-guest-agent enabled in configuration, skipping password replacement\n";
+            print "DEBUG: To enable: Set 'agent: 1' in VM configuration\n";
+            return;
+        }
+        print "SUCCESS: Qemu-guest-agent is enabled for VM $vmid\n";
+        
+        # Vérification 3: Mot de passe cloud-init configuré
+        print "DEBUG: Phase 3 - Checking if cipassword is configured for VM $vmid...\n";
+        if (!$conf->{cipassword}) {
+            print "INFO: VM $vmid does not have cipassword configured, no password replacement needed\n";
+            print "DEBUG: cipassword is required for automatic password replacement\n";
+            return;
+        }
+        
+        # Analyser le format du mot de passe
+        my $password_length = length($conf->{cipassword});
+        my $password_format = 'unknown';
+        if ($conf->{cipassword} =~ /^\$5\$/) {
+            $password_format = 'SHA-512 crypt';
+        } else {
+            $password_format = 'clear text';
+        }
+        
+        print "SUCCESS: cipassword is configured for VM $vmid (length: $password_length, format: $password_format)\n";
+        
+        # Vérification 4: Éligibilité pour le remplacement
+        print "DEBUG: Phase 4 - Determining eligibility for password replacement...\n";
+        if ($password_format eq 'clear text') {
+            print "INFO: VM $vmid has clear text password, password replacement not needed\n";
+            print "DEBUG: Password is already in clear text format, cloud-init will handle it\n";
+            return;
+        }
+        
+        print "SUCCESS: VM $vmid is eligible for password replacement (encrypted password detected)\n";
+        
+        # Phase d'attente de l'agent avec logs détaillés
+        print "DEBUG: Phase 5 - Waiting for qemu-guest-agent to be ready...\n";
+        
+        my $wait_interval = 5;
+        my $wait_time = 0;
+        my $agent_ready = 0;
+        my $consecutive_failures = 0;
+        my $max_consecutive_failures = 5;
+        
+        print "INFO: Starting comprehensive agent readiness check for VM $vmid (no timeout)\n";
+        
+        while (!$agent_ready) {
+            # Vérifier si la VM est toujours en cours d'exécution
+            if (!PVE::QemuServer::check_running($vmid)) {
+                print "INFO: VM $vmid is no longer running, stopping password replacement task during agent wait\n";
+                return;
+            }
+            
+            # Vérifier si la tâche doit s'arrêter
+            if (should_stop_password_task()) {
+                print "INFO: Password replacement task for VM $vmid stopped by user request during agent wait\n";
+                return;
+            }
+            
+            sleep($wait_interval);
+            $wait_time += $wait_interval;
+            
+            my $attempt_number = $wait_time / $wait_interval;
+            
+            print "DEBUG: Agent readiness check #$attempt_number for VM $vmid (total waited: ${wait_time}s)\n";
+            
+            # Test de connectivité avec l'agent
+            eval {
+                my $test_result = PVE::QemuServer::Monitor::mon_cmd($vmid, 'guest-ping');
+                if ($test_result) {
+                    print "SUCCESS: Qemu-guest-agent ping successful for VM $vmid after ${wait_time}s\n";
+                    $agent_ready = 1;
+                    $consecutive_failures = 0;
+                    
+                    # Test additionnel: vérifier la capacité d'exécution
+                    print "DEBUG: Performing additional agent capability test for VM $vmid...\n";
+                    eval {
+                        my $cap_test = PVE::QemuServer::Monitor::mon_cmd($vmid, 'guest-exec', 
+                            path => 'cmd.exe',
+                            arg => ['/c', 'echo', 'agent-test'],
+                            'capture-output' => JSON::true,
+                        );
+                        
+                        if ($cap_test && $cap_test->{pid}) {
+                            print "SUCCESS: Agent execution capability confirmed for VM $vmid\n";
+                        } else {
+                            print "WARN: Agent ping succeeded but execution test failed for VM $vmid\n";
+                        }
+                    };
+                    
+                    # L'agent répond, procéder au remplacement
+                    print "INFO: Initiating cloud-init regeneration with encrypted passwords for VM $vmid...\n";
+                    my $replacement_start = time();
+                    my $success = regenerate_cloudinit_with_encrypted_passwords($vmid, $conf);
+                    my $replacement_duration = time() - $replacement_start;
+                    
+                    if ($success) {
+                        print "SUCCESS: Cloud-init regeneration completed successfully for VM $vmid (duration: ${replacement_duration}s)\n";
+                    } else {
+                        print "ERROR: Cloud-init regeneration failed for VM $vmid (duration: ${replacement_duration}s)\n";
+                    }
+                    last;
+                }
+            };
+            
+            if ($@) {
+                $consecutive_failures++;
+                my $error_msg = $@;
+                $error_msg =~ s/\n/ /g; # Remove newlines for cleaner logging
+                
+                print "DEBUG: Agent ping failed for VM $vmid (attempt #$attempt_number, consecutive failures: $consecutive_failures): $error_msg\n";
+                
+                # Diagnostic d'erreur
+                if ($error_msg =~ /not running/i) {
+                    print "DEBUG: Error suggests VM $vmid is not running or agent service not started\n";
+                } elsif ($error_msg =~ /timeout/i) {
+                    print "DEBUG: Error suggests network or performance issues for VM $vmid\n";
+                } elsif ($error_msg =~ /connection/i) {
+                    print "DEBUG: Error suggests connection issues with VM $vmid\n";
+                }
+                
+                if ($consecutive_failures >= $max_consecutive_failures) {
+                    print "WARN: Too many consecutive failures for VM $vmid, extending wait time\n";
+                    $wait_interval = 10; # Augmenter l'intervalle
+                }
+            } else {
+                $consecutive_failures = 0;
+                $wait_interval = 5; # Réinitialiser l'intervalle
+            }
+        }
+        
+        #         if (!$agent_ready && $wait_time >= $max_wait) {
+        #             print "ERROR: Timeout waiting for qemu-guest-agent to be ready for VM $vmid after ${max_wait}s\n";
+        #             print "DEBUG: Possible causes:\n";
+        #             print "DEBUG:   1. Agent service not installed or not started in the guest\n";
+        #             print "DEBUG:   2. Guest OS still booting or performing initialization\n";
+        #             print "DEBUG:   3. Network connectivity issues\n";
+        #             print "DEBUG:   4. Resource constraints (CPU, memory)\n";
+        #             print "DEBUG:   5. Antivirus or firewall blocking agent communication\n";
+        #         }
+    };
+    
+    if ($@) {
+        my $error_msg = $@;
+        $error_msg =~ s/\n/ /g;
+        print "ERROR: Exception in auto_replace_password_post_start for VM $vmid: $error_msg\n";
+        print "DEBUG: This error occurred in the main evaluation block\n";
+    }
+    
+    my $total_duration = time() - $start_time;
+    print "INFO: Auto password replacement worker finished for VM $vmid (total duration: ${total_duration}s)\n";
+    print "INFO: ===== AUTO PASSWORD REPLACEMENT WORKER COMPLETED =====\n";
 }
 
 1;
